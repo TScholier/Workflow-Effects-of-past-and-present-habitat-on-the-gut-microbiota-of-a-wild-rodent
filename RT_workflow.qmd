@@ -1,0 +1,1851 @@
+---
+title: "R Workflow Scholier et al.,"
+format: html
+embed-resources: true
+editor: visual
+toc: true
+code-fold: true
+code-summary: "Show the code"
+code-tools: true
+---
+
+## Introduction
+
+This Quarto file documents the R worflow used to analyse the data in the paper 'Effects of past and present habitat on the gut microbiota of a wild rodent' written by Tiffany Scholier, Anton Lavrinienko, Eva R. Kallio, Phillip C. Watts & Tapio Mappes.
+
+## Legend
+
+Throughout the code, the past habitat/site of origin is referred to as *sitetr1* and the present habitat/site of transfer is referred to as *sitetr2*. Urban and rural sites are abbreviated by *urb* and *cont* (control), respectively. For example, the term *urbcont* refers to animals that were translocated from urban forest sites to rural forest sites. Overall, time point 1 refers to pre-transfer samples and time point 3 refers to post-transfer samples. 
+
+## Loading necessary R packages
+
+```{r}
+#| output: false
+library(phyloseq) #working with phyloseq objects
+library(dplyr)    #for %>% function
+library(qiime2R)  #for read_qza function
+library(ggplot2)  #creating plots
+library(ggpubr)   #for ggpaired function
+library(vegan)    #for adonis2 function
+library(lmerTest) #for lmer function
+library(rstatix)  #for add_significance function
+
+packageVersion("phyloseq") #1.44.0
+packageVersion("dplyr")    #1.1.3
+packageVersion("qiime2R")  #0.99.6
+packageVersion("ggplot2")  #3.4.3
+packageVersion("ggpubr")   #0.6.0
+packageVersion("vegan")    #2.6.4
+packageVersion("lmerTest") #3.1.3
+packageVersion("rstatix")  #0.7.2
+```
+
+## Go to the directory
+
+```{r}
+setwd("~/Documents/R/RT")
+```
+
+## Preparing all necessary R files
+
+```{r}
+#| output: false
+
+#DATAFRAME FILES
+
+meta<-read.table("metadata_quarto.txt", header=T)
+meta$treatment <- factor(meta$treatment, levels = c("contcont", "urbcont", "conturb", "urburb"))
+meta.mom<-meta %>% filter(type == "mom")
+alpharich<-read_qza("observed_features_vector.qza")$data %>% tibble::rownames_to_column("sampleid")
+shannon<-read_qza("shannon_vector.qza")$data %>% tibble::rownames_to_column("sampleid")
+faith<-read_qza("faith_pd_vector.qza")$data %>% tibble::rownames_to_column("sampleid")
+
+diff.13<-read.table("differences_1_to_3_from_qiime.txt", header=T)
+diff.13$treatment <- factor(diff.13$treatment, levels = c("contcont", "urbcont", "conturb", "urburb"))
+diff.13$sitetr1<-as.factor(diff.13$sitetr1)
+diff.13$sitetr2<-as.factor(diff.13$sitetr2)
+diff.13$change<-as.factor(diff.13$change)
+
+dist.13<-read.table("distances_1_to_3_from_qiime.txt", header=T)
+dist.13$treatment <- factor(dist.13$treatment, levels = c("contcont", "conturb", "urbcont", "urburb"))
+dist.13$sitetr1<-as.factor(dist.13$sitetr1)
+dist.13$sitetr2<-as.factor(dist.13$sitetr2)
+dist.13$change<-as.factor(dist.13$change)
+dist.13.natives<-subset(dist.13, treatment=="urburb" | treatment == "contcont")
+
+metadata<-meta%>% left_join(alpharich)%>% left_join(shannon)%>% left_join(faith)
+metadata$sitetr1<-as.factor(metadata$sitetr1)
+metadata$sitetr2<-as.factor(metadata$sitetr2)
+metadata$time<-as.factor(metadata$time)
+metadata$treatment <- factor(metadata$treatment, levels = c("contcont", "conturb", "urbcont", "urburb"))
+
+metadata.mom<-metadata %>% filter(type == "mom")
+metadata.mom.time1 <- metadata.mom %>% filter(time == "1")
+metadata.mom.time3 <- metadata.mom %>% filter(time == "3")
+metadata.mom.fromurban <- metadata.mom %>% filter(sitetr1 == "urban")
+metadata.mom.fromcontrol <- metadata.mom %>% filter(sitetr1 == "control")
+
+metadata.pup<-metadata %>% filter(type == "pup")
+metadata.pup$geneticcluster<-as.factor(metadata.pup$geneticcluster)
+
+########################################################################
+#RARIFIED PHYLOSEQ
+
+psrt<-qza_to_phyloseq(
+  features="rt_table16s_filtermin10freq_rar30671.qza",taxonomy="rt_taxonomysilva.qza",metadata = "metadata_quarto.txt",tree = "rt_rooted-tree.qza")
+levels(sample_data(psrt)$sitetr1) <- c("control", "urban")
+levels(sample_data(psrt)$sitetr2) <- c("control", "urban")
+levels(sample_data(psrt)$treatment) <- c("contcont", "conturban", "urbancont","urbanurban")
+
+psrt.mom = psrt %>% subset_samples(type == "mom")
+metadata.psrt.mom <- as(sample_data(psrt.mom), "data.frame")
+psrt.mom.time3 = subset_samples(psrt.mom, time != "1")
+psrt.mom.time1 = subset_samples(psrt.mom, time == "1")
+
+psrt.pup = psrt %>% subset_samples(type == "pup")
+metadata.psrt.pup <- as(sample_data(psrt.pup), "data.frame")
+
+psrt.mom3.pup = subset_samples(psrt, time != "1")
+metadata.psrt.mom3.pup <- as(sample_data(psrt.mom3.pup), "data.frame")
+
+psrt.matched = psrt.mom3.pup %>% subset_samples(geneticcluster_2 %in% c("C1", "C5", "C8","C9","C10","C12","C14","C15","C17","C18","C23","C24","C26"))
+metadata.matched <- as(sample_data(psrt.matched), "data.frame")
+
+```
+
+## Recreate Figure 1
+
+**Experimental design of the reciprocal translocation (RT) experiment on wild bank voles**
+
+This figure was made with PowerPoint and GIS software.
+
+## Recreate Figure 2
+
+**Change in the alpha diversity of the gut microbiota of bank voles in terms of past habitat**
+
+```{r}
+#| fig-width: 7
+#| fig-height: 5
+
+plot.asv.13.urban <- ggpaired(metadata.mom.fromurban, 
+                                  x = "time", y = "observed_features", 
+                                  order = c("1", "3"),color = "black",fill= "#f00078",
+                                  line.color = "gray", line.size = 0.4,id = "ind",
+                                  ylab = "ASV richness", xlab = "")+
+  ggtitle("Urban")+
+  scale_x_discrete(labels=c("1" = "Pre-transfer", "3" = "Post-transfer"))+
+  scale_y_continuous(limits = c(150,550))+theme_minimal()
+
+plot.asv.13.rural <- ggpaired(metadata.mom.fromcontrol, 
+                              x = "time", y = "observed_features", 
+                              order = c("1", "3"),color = "black",fill= "#693aa3",
+                              line.color = "gray", line.size = 0.4,id = "ind",
+                              ylab = "ASV richness", xlab = "")+
+  ggtitle("Rural")+
+  scale_x_discrete(labels=c("1" = "Pre-transfer", "3" = "Post-transfer"))+
+  scale_y_continuous(limits = c(100,350))+theme_minimal()
+
+plot.asv.t3<-ggplot(data=metadata.mom.time3, aes(x=sitetr1, y=observed_features, fill=sitetr1))+
+  geom_boxplot() +
+  theme(legend.position="right")+
+  labs(title= "Post-transfer gut microbiota", x= "",y = "")+
+  scale_x_discrete(labels=c("Rural","Urban"))+
+  ylab("ASV richness")+
+  scale_fill_manual(values=c("#693aa3","#f00078"),name=c(""),
+                    labels=c("Rural","Urban"))+
+  geom_signif(y_position = c(550), xmin = c(1), xmax = c(2),annotation = c("*"), tip_length = 0)+
+  theme_minimal()
+
+plot.change.asv<-ggarrange(plot.asv.13.rural, plot.asv.13.urban,
+                           common.legend = FALSE,
+                           legend = "right",
+                           labels = c("B", "C"),
+                           ncol = 1, nrow = 2, align="v"+ theme_void())
+
+plot.asv<-ggarrange(plot.asv.t3, plot.change.asv, 
+                           common.legend = FALSE,
+                           legend = "none",
+                           labels = c("A", ""),
+                           ncol = 2, nrow = 1, align="v"+ theme_void())
+plot.asv #(6 x 6)
+```
+
+## Recreate Figure 3
+
+**Post-transfer gut microbiota compositions of bank voles in terms of past and present habitat**
+
+Panels were either made with R (A and B) or PowerPoint sotftware (C and D).
+
+```{r}
+#| fig-width: 10
+#| fig-height: 4
+
+set.seed(123)
+bray_dist.mom.time3 = phyloseq::distance(psrt.mom.time3, method="bray")
+set.seed(123)
+cap.mom.3.bray <- ordinate(physeq = psrt.mom.time3, method = "CAP",distance = bray_dist.mom.time3,formula = ~ sitetr1+sitetr2)
+plot.mom.3.bray<-plot_ordination(psrt.mom.time3, cap.mom.3.bray,type = "samples",color="treatment")+geom_point(size = 3)+
+  scale_color_manual(values=c("#693aa3","#7777ff","#ffc1e0","#f00078"), name=(""),
+                     labels=c("Rural-Rural","Rural-Urban","Urban-Rural","Urban-Urban"))+
+  ggtitle("Adults")+xlab("CAP Axis.1  [8%]")+ylab("CAP Axis.2  [3.8%]")+theme_minimal()
+
+set.seed(123)
+bray_dist.pup.all = phyloseq::distance(psrt.pup, method="bray")
+set.seed(123)
+cap.pup.all.bray <- ordinate(physeq = psrt.pup, method = "CAP",distance = bray_dist.pup.all,formula = ~ sitetr1+sitetr2)
+plot.pup.cap.bray<-plot_ordination(psrt.pup, cap.pup.all.bray,type = "samples",color="treatment")+geom_point(size = 3)+
+  scale_color_manual(values=c("#693aa3","#7777ff","#ffc1e0","#f00078"), name=(""),
+                     labels=c("Rural-Rural","Rural-Urban","Urban-Rural","Urban-Urban"))+
+  ggtitle("Offspring")+xlab("CAP Axis.1  [3.9%]")+ylab("CAP Axis.2  [1.9%]")+theme_minimal()
+
+plot.cap.fig3<-ggarrange(plot.mom.3.bray, plot.pup.cap.bray,
+                           common.legend = TRUE,
+                           legend = "right",
+                           labels = c("A", "B"),
+                           ncol = 2, nrow = 1, align="v"+ theme_void())
+plot.cap.fig3 # 10 x 12
+```
+
+## Recreate Table S1
+
+**Differences in beta diversity between the pre-transfer gut microbiota of urban and rural bank voles**
+
+```{r}
+#| output: false
+#Preparation (calculating distances + generating new metadata file)
+set.seed(123)
+bray_dist.mom.time1 = phyloseq::distance(psrt.mom.time1, method="bray")
+set.seed(123)
+jacc_dist.mom.time1 = phyloseq::distance(psrt.mom.time1, method="jaccard")
+set.seed(123)
+wunifrac_dist.mom.time1 = phyloseq::distance(psrt.mom.time1, method="wunifrac")
+set.seed(123)
+uunifrac_dist.mom.time1 = phyloseq::distance(psrt.mom.time1, method="uunifrac")
+metadata.psrt.time1 <- as(sample_data(psrt.mom.time1), "data.frame")
+```
+### Bray-Curtis metric
+```{r}
+set.seed(123)
+adonis.mom.1<-adonis2(bray_dist.mom.time1~sitetr1, data=metadata.psrt.time1, by="margin",perm=9999)
+adonis.mom.1 #R2 = 9%, p-value = 3e-04
+set.seed(123)
+mod.mom.1 <- betadisper(bray_dist.mom.time1, metadata.psrt.time1$sitetr1, bias.adjust = TRUE, type=c("centroid"), sqrt.dist = FALSE, add = FALSE)
+anova(mod.mom.1) #No heterogeneity
+boxplot(mod.mom.1)
+```
+### Jaccard metric
+```{r}
+set.seed(123)
+adonis.mom.1.jacc<-adonis2(jacc_dist.mom.time1~sitetr1, data=metadata.psrt.time1, by="margin", perm=9999)
+adonis.mom.1.jacc #R2 = 6.8%, p-value = 3e-04
+set.seed(123)
+mod.mom.1.jacc <- betadisper(jacc_dist.mom.time1, metadata.psrt.time1$sitetr1, bias.adjust = TRUE, type=c("centroid"), sqrt.dist = FALSE, add = FALSE)
+anova(mod.mom.1.jacc) #No heterogeneity
+boxplot(mod.mom.1.jacc)
+```
+### Weighted Unifrac metric
+```{r}
+set.seed(123)
+adonis.mom.1.wu<-adonis2(wunifrac_dist.mom.time1~sitetr1, data=metadata.psrt.time1, by="margin", perm=9999)
+adonis.mom.1.wu #p-value > 0.05
+set.seed(123)
+mod.mom.1.wu <- betadisper(wunifrac_dist.mom.time1, metadata.psrt.time1$sitetr1, bias.adjust = TRUE, type=c("centroid"), sqrt.dist = FALSE, add = FALSE)
+anova(mod.mom.1.wu) #No heterogeneity
+boxplot(mod.mom.1.wu)
+```
+### Unweighted Unifrac metric
+```{r}
+set.seed(123)
+adonis.mom.1.uu<-adonis2(uunifrac_dist.mom.time1~sitetr1, data=metadata.psrt.time1, by="margin", perm=9999)
+adonis.mom.1.uu #R2 = 7.7%, p-value = 2e-04
+set.seed(123)
+mod.mom.1.uu <- betadisper(uunifrac_dist.mom.time1, metadata.psrt.time1$sitetr1, bias.adjust = TRUE, type=c("centroid"), sqrt.dist = FALSE, add = FALSE)
+anova(mod.mom.1.uu) #Heterogeneity!
+boxplot(mod.mom.1.uu) #Higher variance in rural samples in comparison to urban samples
+```
+
+
+
+## Recreate Table S2
+
+**Differences in alpha diversity between the pre-transfer gut microbiota of urban and rural bank voles**
+
+```{r}
+#| output: false
+#Test normality
+shapiro.test(metadata.mom.time1$observed_features) #p-value = 0.264 = NORMAL DISTRIBUTION
+shapiro.test(metadata.mom.time1$shannon_entropy) #p-value = 0.458 = NORMAL DISTRIBUTION
+shapiro.test(metadata.mom.time1$faith_pd) #p-value = 0.6019 = NORMAL DISTRIBUTION
+#Normality = OK -> use linear models
+```
+### ASV richness
+```{r}
+set.seed(123)
+model_asv_t1<-lm(observed_features~sitetr1, data=metadata.mom.time1)
+summary(model_asv_t1)
+
+```
+### Shannon diversity
+```{r}
+set.seed(123)
+model_sh_t1<-lm(shannon_entropy~sitetr1, data=metadata.mom.time1)
+summary(model_sh_t1)
+```
+### Faith's phylogenetic diversity
+```{r}
+
+set.seed(123)
+model_faith_t1<-lm(faith_pd~sitetr1, data=metadata.mom.time1)
+summary(model_faith_t1)
+```
+
+
+## Recreate Table S3
+
+**Temporal change in the alpha diversity of the gut microbiota of bank voles within each experimental group**
+
+```{r}
+#| output: false
+#Order the dataframes (same individuals should we listed together)
+metadata.mom.1.3 <- metadata.mom %>% arrange(ind)
+```
+```{r}
+#| output: false
+# Test normality of the differences
+shapiro.test(diff.13$asv_1_to_3) #p-value = 0.8119 = NORMAL DISTRIBUTION
+shapiro.test(diff.13$shannon_1_to_3) #p-value = 0.9922 = NORMAL DISTRIBUTION
+shapiro.test(diff.13$faith_1_to_3) #p-value = 0.5452 = NORMAL DISTRIBUTION
+```
+### ASV richness
+```{r}
+#Normality = OK -> Use t-tests
+stat.test.13<-metadata.mom.1.3 %>%
+  group_by(treatment) %>%
+  t_test(observed_features ~ time, paired=TRUE,alternative = "two.sided") %>%
+  adjust_pvalue(method = "fdr") %>% add_significance("p.adj") 
+stat.test.13
+
+bp <- ggpaired(metadata.mom.1.3, x = "time", y = "observed_features", order = c("1", "3"), color="treatment",
+               line.color = "gray", line.size = 0.4,id = "ind",ylab = "ASV richness", xlab = "")+ 
+    scale_x_discrete(labels=c("1" = "Pre-transfer", "3" = "Post-transfer"))+
+    facet_wrap(~ treatment, nrow=2,ncol=2)
+bp
+```
+### Shannon diversity
+```{r}
+stat.test.13.shannon<-metadata.mom.1.3 %>%
+  group_by(treatment) %>%
+  t_test(shannon_entropy ~ time, paired=TRUE,alternative = "two.sided") %>%
+  adjust_pvalue(method = "fdr") %>%add_significance("p.adj") 
+stat.test.13.shannon
+
+bp.sh <- ggpaired(metadata.mom.1.3, x = "time", y = "shannon_entropy", order = c("1", "3"), color="treatment",
+                  line.color = "gray", line.size = 0.4,id = "ind",ylab = "Shannon diversity", xlab = "")+ 
+    scale_x_discrete(labels=c("1" = "Pre-transfer", "3" = "Post-transfer"))+ 
+    facet_wrap(~ treatment, nrow=2,ncol=2)
+bp.sh
+```
+### Faith's phylogenetic diversity
+```{r}
+stat.test.13.faith<-metadata.mom.1.3 %>%
+  group_by(treatment) %>%
+  t_test(faith_pd ~ time, paired=TRUE,alternative = "two.sided") %>%
+  adjust_pvalue(method = "fdr") %>%add_significance("p.adj") 
+stat.test.13.faith
+
+bp.pd <- ggpaired(metadata.mom.1.3, x = "time", y = "faith_pd", order = c("1", "3"), color="treatment",
+                  line.color = "gray", line.size = 0.4,id = "ind",ylab = "Faith's PD", xlab = "")+ 
+    scale_x_discrete(labels=c("1" = "Pre-transfer", "3" = "Post-transfer"))+ 
+    facet_wrap(~ treatment, nrow=2,ncol=2)
+bp.pd
+```
+
+
+
+
+## Recreate Table S4
+
+**Pairwise differences in alpha diversity (temporal alpha diversity change) between the gut microbiota of bank voles belonging to different experimental groups**
+
+### ASV richness
+```{r}
+#Normality = OK (see 'Recreate Table S2')-> Use linear models
+model.13.asv <- lm(asv_1_to_3 ~ sitetr1*sitetr2, data = diff.13)
+summary(model.13.asv) 
+model.13.asv.2 <- lm(asv_1_to_3 ~ sitetr1+sitetr2, data = diff.13)
+summary(model.13.asv.2) 
+model.13.asv.3 <- lm(asv_1_to_3 ~ sitetr1, data = diff.13)
+summary(model.13.asv.3) 
+```
+### Shannon diversity
+```{r}
+model.13.shannon <- lm(shannon_1_to_3 ~ sitetr1*sitetr2, data = diff.13)
+summary(model.13.shannon)
+model.13.shannon.2 <- lm(shannon_1_to_3 ~ sitetr1+sitetr2, data = diff.13)
+summary(model.13.shannon.2)
+```
+### Faith's phylogenetic diversity
+```{r}
+model.13.faith <- lm(faith_1_to_3 ~ sitetr1*sitetr2, data = diff.13)
+summary(model.13.faith)
+model.13.faith.2 <- lm(faith_1_to_3 ~ sitetr1+sitetr2, data = diff.13)
+summary(model.13.faith.2)
+```
+### All metrics in terms of change
+```{r}
+model.13.asv.change <- lm(asv_1_to_3 ~ change, data = diff.13)
+summary(model.13.asv.change)
+model.13.shannon.change <- lm(shannon_1_to_3 ~ change, data = diff.13)
+summary(model.13.shannon.change)
+model.13.faith.change <- lm(faith_1_to_3 ~ change, data = diff.13)
+summary(model.13.faith.change)
+```
+
+
+
+## Recreate Table S5
+
+**Differences in alpha diversity between the post-transfer gut microbiota of bank voles belonging to different experimental groups**
+
+```{r}
+#| output: false
+#Test Normality
+shapiro.test(metadata.mom.time3$observed_features) #p-value = 0.0513 = NORMAL DISTRIBUTION
+shapiro.test(metadata.mom.time3$shannon_entropy)   #p-value = 0.7244 = NORMAL DISTRIBUTION
+shapiro.test(metadata.mom.time3$faith_pd)          #p-value = 0.9103 = NORMAL DISTRIBUTION
+#Normality = OK -> use linear models
+```
+### ASV richness
+```{r}
+model_asv_t3<-lm(observed_features~sitetr1*sitetr2, data=metadata.mom.time3)
+summary(model_asv_t3)
+model_asv_t3<-lm(observed_features~sitetr1+sitetr2, data=metadata.mom.time3)
+summary(model_asv_t3)
+model_asv_t3<-lm(observed_features~sitetr1, data=metadata.mom.time3)
+summary(model_asv_t3) #p-value = 0.02
+```
+### Shannon diversity
+```{r}
+model_shannon_t3<-lm(shannon_entropy~sitetr1*sitetr2, data=metadata.mom.time3)
+summary(model_shannon_t3)
+model_shannon_t3<-lm(shannon_entropy~sitetr1+sitetr2, data=metadata.mom.time3)
+summary(model_shannon_t3)
+model_shannon_t3<-lm(shannon_entropy~sitetr1, data=metadata.mom.time3)
+summary(model_shannon_t3) #p-value = 0.0538
+```
+### Faith's phylogenetic diversity
+```{r}
+model_faith_t3<-lm(faith_pd~sitetr1*sitetr2, data=metadata.mom.time3)
+summary(model_faith_t3)
+model_faith_t3<-lm(faith_pd~sitetr1+sitetr2, data=metadata.mom.time3)
+summary(model_faith_t3)
+model_faith_t3<-lm(faith_pd~sitetr1, data=metadata.mom.time3)
+summary(model_faith_t3) #p-value = 0.105
+```
+
+
+## Recreate Table S6
+
+**Pairwise distances in beta diversity (temporal beta diversity change) between the gut microbiota of bank voles belonging to different experimental groups**
+
+```{r}
+#| output: false
+#Test normality
+shapiro.test(dist.13$bray_1_to_3) #p-value = 0.4519 = NORMAL DISTRIBUTION
+shapiro.test(dist.13$jacc_1_to_3) #p-value = 0.4296 = NORMAL DISTRIBUTION
+shapiro.test(dist.13$wunifrac_1_to_3) #p-value = 0.01187 = NOT NORMAL
+#This needs to be adjusted with a log transformation
+dist.13$log_wunifrac_1_to_3 <- log(dist.13$wunifrac_1_to_3)
+shapiro.test(dist.13$log_wunifrac_1_to_3) #p-value = 0.3476 = NORMAL DISTRIBUTION
+shapiro.test(dist.13$unwunifrac_1_to_3) #0.07002 = NORMAL DISTRIBUTION
+```
+### Bray-Curtis metric
+```{r}
+lm.aov.13.bray <- lm(bray_1_to_3 ~ sitetr1*sitetr2, data = dist.13)
+summary(lm.aov.13.bray)
+lm.aov.13.bray.2 <- lm(bray_1_to_3 ~ sitetr1+sitetr2, data = dist.13)
+summary(lm.aov.13.bray.2) 
+lm.aov.13.bray.3 <- lm(bray_1_to_3 ~ sitetr1, data = dist.13)
+summary(lm.aov.13.bray.3) #p-value = 0.107
+```
+### Jaccard metric
+```{r}
+lm.aov.13.jacc <- lm(jacc_1_to_3 ~ sitetr1*sitetr2, data = dist.13)
+summary(lm.aov.13.jacc) 
+lm.aov.13.jacc.2 <- lm(jacc_1_to_3 ~ sitetr1+sitetr2, data = dist.13)
+summary(lm.aov.13.jacc.2) 
+```
+### Weighted Unifrac metric
+```{r}
+lm.aov.13.wunifrac <- lm(log_wunifrac_1_to_3 ~ sitetr1*sitetr2, data = dist.13)
+summary(lm.aov.13.wunifrac) 
+lm.aov.13.wunifrac.2 <- lm(log_wunifrac_1_to_3 ~ sitetr1+sitetr2, data = dist.13)
+summary(lm.aov.13.wunifrac.2) 
+lm.aov.13.wunifrac.3 <- lm(log_wunifrac_1_to_3 ~ sitetr1, data = dist.13)
+summary(lm.aov.13.wunifrac.3) #p-value (origin) = 0.0125 
+```
+### Unweighted Unifrac metric
+```{r}
+lm.aov.13.unwunifrac <- lm(unwunifrac_1_to_3 ~ sitetr1*sitetr2, data = dist.13)
+summary(lm.aov.13.unwunifrac)
+lm.aov.13.unwunifrac.2 <- lm(unwunifrac_1_to_3 ~ sitetr1+sitetr2, data = dist.13)
+summary(lm.aov.13.unwunifrac.2) #p-value > 0.05
+```
+
+
+### All metrics in terms of change
+```{r}
+#All metrics in terms of change
+lm.aov.13.bray.change <- lm(bray_1_to_3 ~ change, data = dist.13)
+summary(lm.aov.13.bray.change) #p-value = 0.0757
+lm.aov.13.jacc.change <- lm(jacc_1_to_3 ~ change, data = dist.13)
+summary(lm.aov.13.jacc.change) #p-value = 0.245
+lm.aov.13.wu.change <- lm(log_wunifrac_1_to_3 ~ change, data = dist.13)
+summary(lm.aov.13.wu.change)   #p-value = 0.311
+lm.aov.13.uu.change <- lm(unwunifrac_1_to_3 ~ change, data = dist.13)
+summary(lm.aov.13.uu.change)   #p-value = 0.991
+
+plot(bray_1_to_3~treatment, data=dist.13)
+plot(jacc_1_to_3~treatment, data=dist.13)
+plot(log_wunifrac_1_to_3~treatment, data=dist.13)
+plot(unwunifrac_1_to_3~treatment, data=dist.13)
+```
+
+
+## Recreate Table S7
+
+**Differences in beta diversity between the post-transfer gut microbiota of bank voles belonging to different experimental groups**
+
+```{r}
+#| output: false
+#Preparation (calculating distances + generating new metadata file)
+set.seed(123)
+bray_dist.mom.time3 = phyloseq::distance(psrt.mom.time3, method="bray")
+set.seed(123)
+jacc_dist.mom.time3 = phyloseq::distance(psrt.mom.time3, method="jaccard")
+set.seed(123)
+wunifrac_dist.mom.time3 = phyloseq::distance(psrt.mom.time3, method="wunifrac")
+set.seed(123)
+uunifrac_dist.mom.time3 = phyloseq::distance(psrt.mom.time3, method="uunifrac")
+metadata.psrt.time3 <- as(sample_data(psrt.mom.time3), "data.frame")
+```
+### Bray-Curtis metric
+```{r}
+set.seed(123)
+adonis.mom.3<-adonis2(bray_dist.mom.time3~sitetr1*sitetr2, data=metadata.psrt.time3, by="margin", perm=9999)
+adonis.mom.3          #p-value > 0.05
+
+set.seed(123)
+adonis.mom.3.2<-adonis2(bray_dist.mom.time3~sitetr1+sitetr2, data=metadata.psrt.time3, by="margin", perm=9999)
+adonis.mom.3.2 
+
+set.seed(123)
+adonis.mom.3.3<-adonis2(bray_dist.mom.time3~sitetr1, data=metadata.psrt.time3, by="margin",perm=9999)
+adonis.mom.3.3 #p = 0.078
+set.seed(123)
+mod.mom.bray.1 <- betadisper(bray_dist.mom.time3, metadata.psrt.time3$sitetr1, bias.adjust = TRUE, type=c("centroid"), sqrt.dist = FALSE, add = FALSE)
+anova(mod.mom.bray.1) #Heterogeneity!
+boxplot(mod.mom.bray.1) #Urban > Rural
+
+set.seed(123)
+adonis.mom.3.4<-adonis2(bray_dist.mom.time3~sitetr2, data=metadata.psrt.time3, by="margin",perm=9999)
+adonis.mom.3.4 #SIGNIFICANT p = 0.0381 
+set.seed(123)
+mod.mom.bray.2 <- betadisper(bray_dist.mom.time3, metadata.psrt.time3$sitetr2, bias.adjust = TRUE, type=c("centroid"), sqrt.dist = FALSE, add = FALSE)
+anova(mod.mom.bray.2) #No heterogeneity
+```
+### Jaccard metric
+```{r}
+set.seed(123)
+adonis.mom.3.jacc<-adonis2(jacc_dist.mom.time3~sitetr1*sitetr2, data=metadata.psrt.time3, by="margin",perm=9999)
+adonis.mom.3.jacc     #p-value > 0.05
+
+set.seed(123)
+adonis.mom.3.2.jacc<-adonis2(jacc_dist.mom.time3~sitetr1+sitetr2, data=metadata.psrt.time3, by="margin", perm=9999)
+adonis.mom.3.2.jacc 
+
+set.seed(123)
+adonis.mom.3.3.jacc<-adonis2(jacc_dist.mom.time3~sitetr1, data=metadata.psrt.time3, by="margin", perm=9999)
+adonis.mom.3.3.jacc #p = 0.0948
+set.seed(123)
+mod.mom.jacc.1 <- betadisper(jacc_dist.mom.time3, metadata.psrt.time3$sitetr1, bias.adjust = TRUE, type=c("centroid"), sqrt.dist = FALSE, add = FALSE)
+anova(mod.mom.jacc.1) #Heterogeneity!
+boxplot(mod.mom.jacc.1) #Urban > Rural
+
+set.seed(123)
+adonis.mom.3.4.jacc<-adonis2(jacc_dist.mom.time3~sitetr2, data=metadata.psrt.time3, by="margin", perm=9999)
+adonis.mom.3.4.jacc #SIGNIFICANT p = 0.0334
+set.seed(123)
+mod.mom.jacc.2 <- betadisper(jacc_dist.mom.time3, metadata.psrt.time3$sitetr2, bias.adjust = TRUE, type=c("centroid"), sqrt.dist = FALSE, add = FALSE)
+anova(mod.mom.jacc.2) #No heterogeneity
+```
+### Weighted Unifrac metric
+```{r}
+set.seed(123)
+adonis.mom.3.wunifrac<-adonis2(wunifrac_dist.mom.time3~sitetr1*sitetr2, data=metadata.psrt.time3, by="margin", perm=9999)
+adonis.mom.3.wunifrac #p-value > 0.05
+
+set.seed(123)
+adonis.mom.3.2.wunifrac<-adonis2(wunifrac_dist.mom.time3~sitetr1+sitetr2, data=metadata.psrt.time3, by="margin", perm=9999)
+adonis.mom.3.2.wunifrac 
+
+set.seed(123)
+adonis.mom.3.3.wunifrac<-adonis2(wunifrac_dist.mom.time3~sitetr1, data=metadata.psrt.time3, by="margin", perm=9999)
+adonis.mom.3.3.wunifrac #p = 0.122
+set.seed(123)
+mod.mom.wunifrac.1 <- betadisper(wunifrac_dist.mom.time3, metadata.psrt.time3$sitetr1, bias.adjust = TRUE, type=c("centroid"), sqrt.dist = FALSE, add = FALSE)
+anova(mod.mom.wunifrac.1) #Heterogeneity!
+boxplot(mod.mom.wunifrac.1) #Urban > Rural
+
+set.seed(123)
+adonis.mom.3.4.wunifrac<-adonis2(wunifrac_dist.mom.time3~sitetr2, data=metadata.psrt.time3, by="margin", perm=9999)
+adonis.mom.3.4.wunifrac #p =  0.1722
+set.seed(123)
+mod.mom.wunifrac.2 <- betadisper(wunifrac_dist.mom.time3, metadata.psrt.time3$sitetr2, bias.adjust = TRUE, type=c("centroid"), sqrt.dist = FALSE, add = FALSE)
+anova(mod.mom.wunifrac.2) #No heterogeneity
+```
+### Unweighted Unifrac metric
+```{r}
+set.seed(123)
+adonis.mom.3.uunifrac<-adonis2(uunifrac_dist.mom.time3~sitetr1*sitetr2, data=metadata.psrt.time3, by="margin", perm=9999)
+adonis.mom.3.uunifrac #p-value > 0.05
+
+set.seed(123)
+adonis.mom.3.2.uunifrac<-adonis2(uunifrac_dist.mom.time3~sitetr1+sitetr2, data=metadata.psrt.time3, by="margin", perm=9999)
+adonis.mom.3.2.uunifrac 
+
+set.seed(123)
+adonis.mom.3.3.uunifrac<-adonis2(uunifrac_dist.mom.time3~sitetr1, data=metadata.psrt.time3, by="margin", perm=9999)
+adonis.mom.3.3.uunifrac #p = 0.122
+set.seed(123)
+mod.mom.uunifrac.1 <- betadisper(uunifrac_dist.mom.time3, metadata.psrt.time3$sitetr1, bias.adjust = TRUE, type=c("centroid"), sqrt.dist = FALSE, add = FALSE)
+anova(mod.mom.uunifrac.1) #No heterogeneity
+
+set.seed(123)
+adonis.mom.3.4.uunifrac<-adonis2(uunifrac_dist.mom.time3~sitetr2, data=metadata.psrt.time3, by="margin", perm=9999)
+adonis.mom.3.4.uunifrac #p =  0.1722
+set.seed(123)
+mod.mom.uunifrac.2 <- betadisper(uunifrac_dist.mom.time3, metadata.psrt.time3$sitetr2, bias.adjust = TRUE, type=c("centroid"), sqrt.dist = FALSE, add = FALSE)
+anova(mod.mom.uunifrac.2) #No heterogeneity
+```
+
+
+## Recreate Table S8
+
+**Differences in alpha diversity and beta diversity between the post-transfer gut microbiota of offspring belonging to different experimental groups**
+
+The offspring data consists of dependent data points since multiple siblings are included into the same dataset. For analyses concerning alpha diversity, we can simply include genetic cluster (i.e., siblings belong to the same group) as a random effect in lmer models. For beta diversity analyses, there are no straightforward methods to include random effects within adonis2 models. To deal with the dependence in our data, we coded a loop (n iterations = 1000) where 1) one sibling per genetic cluster gets randomly selected (33 individuals are left), 2) the adonis2 output gets computed based upon this reduced dataset and 3) the average value for all output generated over 1000 runs gets calculated.
+
+<span style="color:red;">The same output is generated by the loop when 1000 or 10 iterations are used, so the workflow in this quarto document contains the lowest number of iterations for convenience and efficiency.</span>
+
+```{r}
+#| output: false
+shapiro.test(metadata.pup$observed_features)     #p-value = 0.0003368
+metadata.pup$observed_features_log <-log(metadata.pup$observed_features)
+shapiro.test(metadata.pup$observed_features_log) #p-value = 0.2536
+shapiro.test(metadata.pup$shannon_entropy)       #p-value = 0.1673
+shapiro.test(metadata.pup$faith_pd)              #p-value = 0.09069
+```
+### ASV richness
+```{r}
+set.seed(123)
+model3<-lmer(observed_features_log~sitetr1*sitetr2 + (1|geneticcluster), data=metadata.pup)
+summary(model3)
+
+set.seed(123)
+model3.1<-lmer(observed_features_log~sitetr1+sitetr2 + (1|geneticcluster), data=metadata.pup)
+summary(model3.1)
+```
+### Shannon diversity
+```{r}
+set.seed(123)
+model3.sh<-lmer(shannon_entropy~sitetr1*sitetr2 + (1|geneticcluster), data=metadata.pup)
+summary(model3.sh)
+
+set.seed(123)
+model3.sh.1<-lmer(shannon_entropy~sitetr1+sitetr2 + (1|geneticcluster), data=metadata.pup)
+summary(model3.sh.1)
+```
+### Faith's phylogenetic diversity
+```{r}
+set.seed(123)
+model3.pd<-lmer(faith_pd~sitetr1*sitetr2 + (1|geneticcluster), data=metadata.pup)
+summary(model3.pd)
+
+set.seed(123)
+model3.pd.1<-lmer(faith_pd~sitetr1+sitetr2 + (1|geneticcluster), data=metadata.pup)
+summary(model3.pd.1)
+```
+
+
+### Bray-Curtis metric
+
+```{r}
+#################################################
+#BRAYCURTIS 1000 iterations = results look the same
+#################################################
+#INTERACTION = NS (0.4787)
+#SOM IN TERMS OF SITETR1 = NS (0.3909), IN TERMS OF SITETR2 = almost significant (0.0612)
+#SITETR1 = NS = 0.3926
+#SITETR2 = almost significant (0.0577)
+#################################################
+#adonis2
+pvalue.adonis2.interaction<-0
+pvalue.adonis2.som.sitetr1<-0
+pvalue.adonis2.som.sitetr2<-0
+pvalue.bray.sitetr1<-0
+pvalue.bray.sitetr2<-0
+sumofsqs.1<-0
+sumofsqs.2<-0
+sumofsqs.res<-0
+sumofsqs.tot<-0
+sumofsqs.sitetr1.1<-0
+sumofsqs.sitetr1.res<-0
+sumofsqs.sitetr2.1<-0
+sumofsqs.sitetr2.res<-0
+r2.1<-0
+r2.2<-0
+r2.res<-0
+r2.sitetr1<-0
+r2.sitetr2<-0
+f.1<-0
+f.2<-0
+f.sitetr1<-0
+f.sitetr2<-0
+#betadisper
+pvalue.betadisper.sitetr1 <-0
+pvalue.betadisper.sitetr2 <-0
+
+n_iterations <- 10
+for (i in 1:n_iterations)  
+{
+  #Take 1 random sample of pup per mom
+  meta.pup.1sibling<-metadata.pup %>% group_by(geneticcluster) %>% dplyr::slice_sample(n = 1) %>% as.data.frame()
+  #make this subset into a dataframe
+  meta_subset_bray<-as.data.frame(meta.pup.1sibling)
+  write.table(meta_subset_bray,"meta_subset_bray.txt",sep="\t",row.names=FALSE, quote = FALSE)
+  #make a new phyloseq with only 33 pups instead of 72
+  psrt.pup.nosibling<-qza_to_phyloseq(
+    features="rt_table16s_filtermin10freq_rar30671.qza",
+    taxonomy="rt_taxonomysilva.qza",
+    metadata = "meta_subset_bray.txt",
+    tree = "rt_rooted-tree.qza"
+  )
+  metadata.psrt.pup.nosibling <- as(sample_data(psrt.pup.nosibling), "data.frame")
+  #Calculate distance for this phyloseq
+  set.seed(123)
+  bray_dist.pup.nosibling = phyloseq::distance(psrt.pup.nosibling, method="bray")
+  
+  #Calculate adonis for this phyloseq
+  set.seed(123)
+  pmod.pup.nosibling_adonis2_1<-adonis2(bray_dist.pup.nosibling~sitetr1+sitetr2+sitetr1:sitetr2, data=metadata.psrt.pup.nosibling, by="margin", perm=9999)
+  set.seed(123)
+  pmod.pup.nosibling_adonis2_2<-adonis2(bray_dist.pup.nosibling~sitetr1+sitetr2, data=metadata.psrt.pup.nosibling, by="margin", perm=9999)
+  set.seed(123)
+  pmod.pup.nosibling.sitetr1<-adonis2(bray_dist.pup.nosibling~sitetr1, data=metadata.psrt.pup.nosibling, by="terms", perm=9999)
+  set.seed(123)
+  pmod.pup.nosibling.sitetr2<-adonis2(bray_dist.pup.nosibling~sitetr2, data=metadata.psrt.pup.nosibling, by="terms", perm=9999)
+  
+  #calculate group dispersion
+  set.seed(123)
+  betadisper.pup.nosibling.sitetr1 <- betadisper(bray_dist.pup.nosibling, phyloseq::sample_data(psrt.pup.nosibling)$sitetr1, bias.adjust = TRUE, type=c("centroid"), sqrt.dist = FALSE, add = FALSE)
+  betadisper.pup.nosibling.sitetr1.anova<-anova(betadisper.pup.nosibling.sitetr1)
+  set.seed(123)
+  betadisper.pup.nosibling.sitetr2 <- betadisper(bray_dist.pup.nosibling, phyloseq::sample_data(psrt.pup.nosibling)$sitetr2, bias.adjust = TRUE, type=c("centroid"), sqrt.dist = FALSE, add = FALSE)
+  betadisper.pup.nosibling.sitetr2.anova<-anova(betadisper.pup.nosibling.sitetr2)
+  
+  #summate all the pvalues into one object
+  
+  #INTERACTION: sitetr1 * sitetr2
+  pvalue.adonis2.interaction<-pvalue.adonis2.interaction+pmod.pup.nosibling_adonis2_1$`Pr(>F)`[1]
+  #SUM: sitetr1 + sitetr2
+  pvalue.adonis2.som.sitetr1<-pvalue.adonis2.som.sitetr1+pmod.pup.nosibling_adonis2_2$`Pr(>F)`[1]
+  pvalue.adonis2.som.sitetr2<-pvalue.adonis2.som.sitetr2+pmod.pup.nosibling_adonis2_2$`Pr(>F)`[2]
+  sumofsqs.1<-sumofsqs.1+pmod.pup.nosibling_adonis2_2$SumOfSqs[1]
+  sumofsqs.2<-sumofsqs.2+pmod.pup.nosibling_adonis2_2$SumOfSqs[2]
+  sumofsqs.res<-sumofsqs.res+pmod.pup.nosibling_adonis2_2$SumOfSqs[3]
+  r2.1<-r2.1+pmod.pup.nosibling_adonis2_2$R2[1]
+  r2.2<-r2.2+pmod.pup.nosibling_adonis2_2$R2[2]
+  f.1<-f.1+pmod.pup.nosibling_adonis2_2$F[1]
+  f.2<-f.2+pmod.pup.nosibling_adonis2_2$F[2]
+  #Site of origin: sitetr1
+  pvalue.bray.sitetr1<-pvalue.bray.sitetr1 + pmod.pup.nosibling.sitetr1$`Pr(>F)`[1] 
+  sumofsqs.sitetr1.1<-sumofsqs.sitetr1.1+pmod.pup.nosibling.sitetr1$SumOfSqs[1]
+  sumofsqs.sitetr1.res<-sumofsqs.sitetr1.res+pmod.pup.nosibling.sitetr1$SumOfSqs[2]
+  r2.sitetr1<-r2.sitetr1+pmod.pup.nosibling.sitetr1$R2[1]
+  f.sitetr1<-f.sitetr1+pmod.pup.nosibling.sitetr1$F[1]
+  #Site of transfer: sitetr2
+  pvalue.bray.sitetr2<-pvalue.bray.sitetr2 + pmod.pup.nosibling.sitetr2$`Pr(>F)`[1] 
+  sumofsqs.sitetr2.1<-sumofsqs.sitetr2.1+pmod.pup.nosibling.sitetr2$SumOfSqs[1]
+  sumofsqs.sitetr2.res<-sumofsqs.sitetr2.res+pmod.pup.nosibling.sitetr2$SumOfSqs[2]
+  r2.sitetr2<-r2.sitetr2+pmod.pup.nosibling.sitetr2$R2[1]
+  f.sitetr2<-f.sitetr2+pmod.pup.nosibling.sitetr2$F[1]
+  #Group dispersion
+  pvalue.betadisper.sitetr1<-pvalue.betadisper.sitetr1 + betadisper.pup.nosibling.sitetr1.anova$`Pr(>F)`[1]
+  pvalue.betadisper.sitetr2<-pvalue.betadisper.sitetr2 + betadisper.pup.nosibling.sitetr2.anova$`Pr(>F)`[1]
+  
+}
+#RESULTS
+
+#INTERACTION: sitetr1*sitetr2
+final_pvalue.bray.interaction<-pvalue.adonis2.interaction/n_iterations #p=0.4787
+#SOM: sitetr1 + sitetr2
+final_pvalue.adonis2.som.sitetr1 <- pvalue.adonis2.som.sitetr1/n_iterations  #0.3909
+final_pvalue.adonis2.som.sitetr2 <- pvalue.adonis2.som.sitetr2/n_iterations  #0.0612
+final_ss.som.sitetr1<-sumofsqs.1/n_iterations #
+final_ss.som.sitetr2<-sumofsqs.2/n_iterations #
+final_ss.som.res<-sumofsqs.res/n_iterations 
+calculated_ss.som.total <- final_ss.som.sitetr1+final_ss.som.sitetr2+final_ss.som.res
+final_r2.som.sitetr1 <- r2.1/n_iterations #0.03211807
+final_r2.som.sitetr2 <- r2.2/n_iterations #0.04200681
+calculated_r2.som.res = (1-(final_r2.som.sitetr1)-(final_r2.som.sitetr2))
+final_f.1 <- f.1/n_iterations 
+final_f.2 <- f.2/n_iterations 
+
+#SITE OF ORIGIN
+final_pvalue.bray.sitetr1 <- pvalue.bray.sitetr1/n_iterations
+final_sumofsqs.sitetr1.1 <- sumofsqs.sitetr1.1/n_iterations
+final_sumofsqs.sitetr1.res <- sumofsqs.sitetr1.res/n_iterations
+calculated_ss.sitetr1.total <- final_sumofsqs.sitetr1.1+final_sumofsqs.sitetr1.res
+final_r2.sitetr1.1 <- r2.sitetr1/n_iterations
+calculated_r2.sitetr1.res = (1-final_r2.sitetr1.1)
+final_f.sitetr1 <- f.sitetr1/n_iterations
+
+#SITE OF TRANSFER
+final_pvalue.bray.sitetr2 <- pvalue.bray.sitetr2/n_iterations
+final_sumofsqs.sitetr2.1 <- sumofsqs.sitetr2.1/n_iterations
+final_sumofsqs.sitetr2.res <- sumofsqs.sitetr2.res/n_iterations
+calculated_ss.sitetr2.total <- final_sumofsqs.sitetr2.1+final_sumofsqs.sitetr2.res
+final_r2.sitetr2.1 <- r2.sitetr2/n_iterations
+calculated_r2.sitetr2.res = (1-final_r2.sitetr2.1)
+final_f.sitetr2 <- f.sitetr2/n_iterations
+#GROUP DISPERSION
+final_pvalue.betadisper.sitetr1 <- pvalue.betadisper.sitetr1/n_iterations #0.5822573
+final_pvalue.betadisper.sitetr2 <- pvalue.betadisper.sitetr2/n_iterations #0.9971147
+
+#MAKE TABLES
+df_som_bray <- data.frame(var=c('sitetr1', 'sitetr2', 'Residual', 'Total'),
+                          Df=c(1,1,30,32),
+                          SumOfSqs=c(final_ss.som.sitetr1,final_ss.som.sitetr2,final_ss.som.res,calculated_ss.som.total),
+                          R2=c(final_r2.som.sitetr1,final_r2.som.sitetr2,calculated_r2.som.res,1),
+                          "F"=c(final_f.1, final_f.2 ,"",""),
+                          "p"=c(final_pvalue.adonis2.som.sitetr1,final_pvalue.adonis2.som.sitetr2,"",""))
+
+df_sitetr1_bray <- data.frame(var=c('sitetr1', 'Residual', 'Total'),
+                              Df=c(1,31,32),
+                              SumOfSqs=c(final_sumofsqs.sitetr1.1 , final_sumofsqs.sitetr1.res , calculated_ss.sitetr1.total),
+                              R2=c(final_r2.som.sitetr1 , calculated_r2.sitetr1.res , "1"),
+                              "F"=c(final_f.sitetr1,"",""),
+                              "p"=c(final_pvalue.bray.sitetr1,"",""))
+
+df_sitetr2_bray <- data.frame(var=c('sitetr2', 'Residual', 'Total'),
+                              Df=c(1,31,32),
+                              SumOfSqs=c(final_sumofsqs.sitetr2.1 , final_sumofsqs.sitetr2.res , calculated_ss.sitetr2.total),
+                              R2=c(final_r2.som.sitetr2 , calculated_r2.sitetr2.res , "1"),
+                              "F"=c(final_f.sitetr2,"",""),
+                              "p"=c(final_pvalue.bray.sitetr2,"",""))
+
+```
+**Output table treatment**
+```{r}
+df_som_bray
+write.table(df_som_bray, "adonis2_som_bray.txt")
+```
+**Output table in terms of site of origin**
+```{r}
+df_sitetr1_bray
+write.table(df_sitetr1_bray, "adonis2_sitetr1_bray.txt")
+```
+**Betadisper p-value site of origin**
+```{r}
+final_pvalue.betadisper.sitetr1
+```
+**Output table in terms of site of transfer**
+```{r}
+df_sitetr2_bray
+write.table(df_sitetr2_bray, "adonis2_sitetr2_bray.txt")
+```
+**Betadisper p-value site of transfer**
+```{r}
+final_pvalue.betadisper.sitetr2
+```
+
+
+### Jaccard metric
+
+```{r}
+#################################################
+#JACCARD 1000 iterations = results look the same
+#################################################
+#INTERACTION = NS (p=0.5641)
+#SOM IN TERMS OF SITETR1 = NS (0.3782) , IN TERMS OF SITETR2 = almost significant(0.0608)
+#SITETR1 = NS (0.3794)
+#SITETR2 = almost significant (0.0576)
+#################################################
+#adonis2
+pvalue.adonis2.interaction.jacc<-0
+pvalue.adonis2.som.sitetr1.jacc<-0
+pvalue.adonis2.som.sitetr2.jacc<-0
+pvalue.sitetr1.jacc<-0
+pvalue.sitetr2.jacc<-0
+sumofsqs.1.jacc<-0
+sumofsqs.2.jacc<-0
+sumofsqs.res.jacc<-0
+sumofsqs.tot.jacc<-0
+sumofsqs.sitetr1.1.jacc<-0
+sumofsqs.sitetr1.res.jacc<-0
+sumofsqs.sitetr2.1.jacc<-0
+sumofsqs.sitetr2.res.jacc<-0
+r2.1.jacc<-0
+r2.2.jacc<-0
+r2.res.jacc<-0
+r2.sitetr1.jacc<-0
+r2.sitetr2.jacc<-0
+f.1.jacc<-0
+f.2.jacc<-0
+f.sitetr1.jacc<-0
+f.sitetr2.jacc<-0
+#betadisper
+pvalue.betadisper.sitetr1.jacc <-0
+pvalue.betadisper.sitetr2.jacc <-0
+
+n_iterations <- 10
+for (i in 1:n_iterations)  
+{
+  #Take 1 random sample of pup per mom
+  meta.pup.1sibling<-metadata.pup %>% group_by(geneticcluster) %>% dplyr::slice_sample(n = 1) %>% as.data.frame()
+  #make this subset into a dataframe
+  meta_subset_jacc<-as.data.frame(meta.pup.1sibling)
+  write.table(meta_subset_jacc,"meta_subset_jacc.txt",sep="\t",row.names=FALSE, quote = FALSE)
+  #make a new phyloseq with only 33 pups instead of 72
+  psrt.pup.nosibling.jacc<-qza_to_phyloseq(
+    features="rt_table16s_filtermin10freq_rar30671.qza",
+    taxonomy="rt_taxonomysilva.qza",
+    metadata = "meta_subset_jacc.txt",
+    tree = "rt_rooted-tree.qza"
+  )
+  metadata.psrt.pup.nosibling.jacc <- as(sample_data(psrt.pup.nosibling.jacc), "data.frame")
+  #Calculate distance for this phyloseq
+  set.seed(123)
+  jacc_dist.pup.nosibling = phyloseq::distance(psrt.pup.nosibling.jacc, method="jaccard")
+  
+  #Calculate adonis for this phyloseq
+  set.seed(123)
+  pmod.pup.nosibling_adonis2_1.jacc <-adonis2(jacc_dist.pup.nosibling~sitetr1+sitetr2+sitetr1:sitetr2, data=metadata.psrt.pup.nosibling.jacc , by="margin", perm=9999)
+  set.seed(123)
+  pmod.pup.nosibling_adonis2_2.jacc <-adonis2(jacc_dist.pup.nosibling~sitetr1+sitetr2, data=metadata.psrt.pup.nosibling.jacc , by="margin", perm=9999)
+  set.seed(123)
+  pmod.pup.nosibling.sitetr1.jacc <-adonis2(jacc_dist.pup.nosibling~sitetr1, data=metadata.psrt.pup.nosibling.jacc , by="terms", perm=9999)
+  set.seed(123)
+  pmod.pup.nosibling.sitetr2.jacc <-adonis2(jacc_dist.pup.nosibling~sitetr2, data=metadata.psrt.pup.nosibling.jacc , by="terms", perm=9999)
+
+  #calculate group dispersion
+  set.seed(123)
+  betadisper.pup.nosibling.sitetr1.jacc  <- betadisper(jacc_dist.pup.nosibling, phyloseq::sample_data(psrt.pup.nosibling.jacc)$sitetr1, bias.adjust = TRUE, type=c("centroid"), sqrt.dist = FALSE, add = FALSE)
+  betadisper.pup.nosibling.sitetr1.anova.jacc <-anova(betadisper.pup.nosibling.sitetr1.jacc)
+  set.seed(123)
+  betadisper.pup.nosibling.sitetr2.jacc  <- betadisper(jacc_dist.pup.nosibling, phyloseq::sample_data(psrt.pup.nosibling.jacc)$sitetr2, bias.adjust = TRUE, type=c("centroid"), sqrt.dist = FALSE, add = FALSE)
+  betadisper.pup.nosibling.sitetr2.anova.jacc<-anova(betadisper.pup.nosibling.sitetr2.jacc)
+  
+  #summate all the pvalues into one object
+
+  #INTERACTION: sitetr1 * sitetr2
+  pvalue.adonis2.interaction.jacc<-pvalue.adonis2.interaction.jacc+pmod.pup.nosibling_adonis2_1.jacc$`Pr(>F)`[1]
+  #SUM: sitetr1 + sitetr2
+  pvalue.adonis2.som.sitetr1.jacc<-pvalue.adonis2.som.sitetr1.jacc+pmod.pup.nosibling_adonis2_2.jacc$`Pr(>F)`[1]
+  pvalue.adonis2.som.sitetr2.jacc<-pvalue.adonis2.som.sitetr2.jacc+pmod.pup.nosibling_adonis2_2.jacc$`Pr(>F)`[2]
+  sumofsqs.1.jacc<-sumofsqs.1.jacc+pmod.pup.nosibling_adonis2_2.jacc$SumOfSqs[1]
+  sumofsqs.2.jacc<-sumofsqs.2.jacc+pmod.pup.nosibling_adonis2_2.jacc$SumOfSqs[2]
+  sumofsqs.res.jacc<-sumofsqs.res.jacc+pmod.pup.nosibling_adonis2_2.jacc$SumOfSqs[3]
+  r2.1.jacc<-r2.1.jacc+pmod.pup.nosibling_adonis2_2.jacc$R2[1]
+  r2.2.jacc<-r2.2.jacc+pmod.pup.nosibling_adonis2_2.jacc$R2[2]
+  f.1.jacc<-f.1.jacc+pmod.pup.nosibling_adonis2_2.jacc$F[1]
+  f.2.jacc<-f.2.jacc+pmod.pup.nosibling_adonis2_2.jacc$F[2]
+  #Site of origin: sitetr1
+  pvalue.sitetr1.jacc<-pvalue.sitetr1.jacc + pmod.pup.nosibling.sitetr1.jacc$`Pr(>F)`[1] 
+  sumofsqs.sitetr1.1.jacc<-sumofsqs.sitetr1.1.jacc+pmod.pup.nosibling.sitetr1.jacc$SumOfSqs[1]
+  sumofsqs.sitetr1.res.jacc<-sumofsqs.sitetr1.res.jacc+pmod.pup.nosibling.sitetr1.jacc$SumOfSqs[2]
+  r2.sitetr1.jacc<-r2.sitetr1.jacc+pmod.pup.nosibling.sitetr1.jacc$R2[1]
+  f.sitetr1.jacc<-f.sitetr1.jacc+pmod.pup.nosibling.sitetr1.jacc$F[1]
+  #Site of transfer: sitetr2
+  pvalue.sitetr2.jacc<-pvalue.sitetr2.jacc + pmod.pup.nosibling.sitetr2.jacc$`Pr(>F)`[1] 
+  sumofsqs.sitetr2.1.jacc<-sumofsqs.sitetr2.1.jacc+pmod.pup.nosibling.sitetr2.jacc$SumOfSqs[1]
+  sumofsqs.sitetr2.res.jacc<-sumofsqs.sitetr2.res.jacc+pmod.pup.nosibling.sitetr2.jacc$SumOfSqs[2]
+  r2.sitetr2.jacc<-r2.sitetr2.jacc+pmod.pup.nosibling.sitetr2.jacc$R2[1]
+  f.sitetr2.jacc<-f.sitetr2.jacc+pmod.pup.nosibling.sitetr2.jacc$F[1]
+  #Group dispersion
+  pvalue.betadisper.sitetr1.jacc<-pvalue.betadisper.sitetr1.jacc + betadisper.pup.nosibling.sitetr1.anova.jacc$`Pr(>F)`[1]
+  pvalue.betadisper.sitetr2.jacc<-pvalue.betadisper.sitetr2.jacc + betadisper.pup.nosibling.sitetr2.anova.jacc$`Pr(>F)`[1]
+  
+}
+#RESULTS
+
+#INTERACTION: sitetr1*sitetr2
+final_pvalue.interaction.jacc<-pvalue.adonis2.interaction.jacc/n_iterations #p=0.5641
+#SOM: sitetr1 + sitetr2
+final_pvalue.adonis2.som.sitetr1.jacc <- pvalue.adonis2.som.sitetr1.jacc/n_iterations  #0.3782
+final_pvalue.adonis2.som.sitetr2.jacc <- pvalue.adonis2.som.sitetr2.jacc/n_iterations  #0.0608
+final_ss.som.sitetr1.jacc<-sumofsqs.1.jacc/n_iterations #
+final_ss.som.sitetr2.jacc<-sumofsqs.2.jacc/n_iterations #
+final_ss.som.res.jacc<-sumofsqs.res.jacc/n_iterations 
+calculated_ss.som.total.jacc <- final_ss.som.sitetr1.jacc+final_ss.som.sitetr2.jacc+final_ss.som.res.jacc
+final_r2.som.sitetr1.jacc <- r2.1.jacc/n_iterations #0.
+final_r2.som.sitetr2.jacc <- r2.2.jacc/n_iterations #0.
+calculated_r2.som.res.jacc = (1-(final_r2.som.sitetr1.jacc)-(final_r2.som.sitetr2.jacc))
+final_f.1.jacc <- f.1.jacc/n_iterations 
+final_f.2.jacc <- f.2.jacc/n_iterations 
+
+#SITE OF ORIGIN
+final_pvalue.sitetr1.jacc <- pvalue.sitetr1.jacc/n_iterations #0.3794
+final_sumofsqs.sitetr1.1.jacc <- sumofsqs.sitetr1.1.jacc/n_iterations
+final_sumofsqs.sitetr1.res.jacc <- sumofsqs.sitetr1.res.jacc/n_iterations
+calculated_ss.sitetr1.total.jacc <- final_sumofsqs.sitetr1.1.jacc+final_sumofsqs.sitetr1.res.jacc
+final_r2.sitetr1.1.jacc <- r2.sitetr1.jacc/n_iterations
+calculated_r2.sitetr1.res.jacc = (1-final_r2.sitetr1.1.jacc)
+final_f.sitetr1.jacc <- f.sitetr1.jacc/n_iterations
+
+#SITE OF TRANSFER
+final_pvalue.sitetr2.jacc <- pvalue.sitetr2.jacc/n_iterations #0.0576
+final_sumofsqs.sitetr2.1.jacc <- sumofsqs.sitetr2.1.jacc/n_iterations
+final_sumofsqs.sitetr2.res.jacc <- sumofsqs.sitetr2.res.jacc/n_iterations
+calculated_ss.sitetr2.total.jacc <- final_sumofsqs.sitetr2.1.jacc+final_sumofsqs.sitetr2.res.jacc
+final_r2.sitetr2.1.jacc <- r2.sitetr2.jacc/n_iterations
+calculated_r2.sitetr2.res.jacc = (1-final_r2.sitetr2.1.jacc)
+final_f.sitetr2.jacc<- f.sitetr2.jacc/n_iterations
+
+#GROUP DISPERSION
+final_pvalue.betadisper.sitetr1.jacc <- pvalue.betadisper.sitetr1.jacc/n_iterations #0.6447998
+final_pvalue.betadisper.sitetr2.jacc <- pvalue.betadisper.sitetr2.jacc/n_iterations #0.9854238
+
+#MAKE TABLES
+df_som_jaccard <- data.frame(var=c('sitetr1', 'sitetr2', 'Residual', 'Total'),
+                          Df=c(1,1,30,32),
+                          SumOfSqs=c(final_ss.som.sitetr1.jacc,final_ss.som.sitetr2.jacc,final_ss.som.res.jacc,calculated_ss.som.total.jacc),
+                          R2=c(final_r2.som.sitetr1.jacc,final_r2.som.sitetr2.jacc,calculated_r2.som.res.jacc,1),
+                          "F"=c(final_f.1, final_f.2.jacc ,"",""),
+                          "p"=c(final_pvalue.adonis2.som.sitetr1.jacc,final_pvalue.adonis2.som.sitetr2.jacc,"",""))
+
+df_sitetr1_jaccard <- data.frame(var=c('sitetr1', 'Residual', 'Total'),
+                              Df=c(1,31,32),
+                              SumOfSqs=c(final_sumofsqs.sitetr1.1.jacc , final_sumofsqs.sitetr1.res.jacc , calculated_ss.sitetr1.total.jacc),
+                              R2=c(final_r2.som.sitetr1.jacc , calculated_r2.sitetr1.res.jacc , "1"),
+                              "F"=c(final_f.sitetr1.jacc,"",""),
+                              "p"=c(final_pvalue.sitetr1.jacc,"",""))
+
+df_sitetr2_jaccard <- data.frame(var=c('sitetr2', 'Residual', 'Total'),
+                              Df=c(1,31,32),
+                              SumOfSqs=c(final_sumofsqs.sitetr2.1.jacc , final_sumofsqs.sitetr2.res.jacc , calculated_ss.sitetr2.total.jacc),
+                              R2=c(final_r2.som.sitetr2.jacc , calculated_r2.sitetr2.res.jacc , "1"),
+                              "F"=c(final_f.sitetr2.jacc,"",""),
+                              "p"=c(final_pvalue.sitetr2.jacc,"",""))
+
+#################################################
+```
+**Output table treatment**
+```{r}
+df_som_jaccard
+write.table(df_som_jaccard, "adonis2_som_jaccard.txt")
+```
+**Output table in terms of site of origin**
+```{r}
+df_sitetr1_jaccard
+write.table(df_sitetr1_jaccard, "adonis2_sitetr1_jaccard.txt")
+```
+**Betadisper p-value site of origin**
+```{r}
+final_pvalue.betadisper.sitetr1.jacc
+```
+**Output table in terms of site of transfer**
+```{r}
+df_sitetr2_jaccard
+write.table(df_sitetr2_jaccard, "adonis2_sitetr2_jaccard.txt")
+```
+**Betadisper p-value site of transfer**
+```{r}
+final_pvalue.betadisper.sitetr2.jacc
+```
+
+### Weighted Unifrac metric
+
+```{r}
+#################################################
+#WEIGHTED UNIFRAC 1000 iterations = results look the same
+#################################################
+#INTERACTION = NS (0.1747)
+#SOM IN TERMS OF SITETR1 = NS (0.2498), IN TERMS OF SITETR2 = NS (0.4087)
+#SITETR1 = NS (0.2193)
+#SITETR2 = NS (0.3679)
+#################################################
+#adonis2
+pvalue.adonis2.interaction.wunifrac<-0
+pvalue.adonis2.som.sitetr1.wunifrac<-0
+pvalue.adonis2.som.sitetr2.wunifrac<-0
+pvalue.sitetr1.wunifrac<-0
+pvalue.sitetr2.wunifrac<-0
+sumofsqs.1.wunifrac<-0
+sumofsqs.2.wunifrac<-0
+sumofsqs.res.wunifrac<-0
+sumofsqs.tot.wunifrac<-0
+sumofsqs.sitetr1.1.wunifrac<-0
+sumofsqs.sitetr1.res.wunifrac<-0
+sumofsqs.sitetr2.1.wunifrac<-0
+sumofsqs.sitetr2.res.wunifrac<-0
+r2.1.wunifrac<-0
+r2.2.wunifrac<-0
+r2.res.wunifrac<-0
+r2.sitetr1.wunifrac<-0
+r2.sitetr2.wunifrac<-0
+f.1.wunifrac<-0
+f.2.wunifrac<-0
+f.sitetr1.wunifrac<-0
+f.sitetr2.wunifrac<-0
+#betadisper
+pvalue.betadisper.sitetr1.wunifrac <-0
+pvalue.betadisper.sitetr2.wunifrac <-0
+
+n_iterations <- 10
+for (i in 1:n_iterations)  
+{
+  #Take 1 random sample of pup per mom
+  meta.pup.1sibling<-metadata.pup %>% group_by(geneticcluster) %>% dplyr::slice_sample(n = 1) %>% as.data.frame()
+  #make this subset into a dataframe
+  meta_subset_wunifrac<-as.data.frame(meta.pup.1sibling)
+  write.table(meta_subset_wunifrac,"meta_subset_wunifrac.txt",sep="\t",row.names=FALSE, quote = FALSE)
+  #make a new phyloseq with only 33 pups instead of 72
+  psrt.pup.nosibling.wunifrac<-qza_to_phyloseq(
+    features="rt_table16s_filtermin10freq_rar30671.qza",
+    taxonomy="rt_taxonomysilva.qza",
+    metadata = "meta_subset_wunifrac.txt",
+    tree = "rt_rooted-tree.qza"
+  )
+  metadata.psrt.pup.nosibling.wunifrac <- as(sample_data(psrt.pup.nosibling.wunifrac), "data.frame")
+  #Calculate distance for this phyloseq
+  set.seed(123)
+  wunifrac_dist.pup.nosibling = phyloseq::distance(psrt.pup.nosibling.wunifrac, method="wunifrac")
+  
+  #Calculate adonis for this phyloseq
+  set.seed(123)
+  pmod.pup.nosibling_adonis2_1.wunifrac <-adonis2(wunifrac_dist.pup.nosibling~sitetr1+sitetr2+sitetr1:sitetr2, data=metadata.psrt.pup.nosibling.wunifrac , by="margin", perm=9999)
+  set.seed(123)
+  pmod.pup.nosibling_adonis2_2.wunifrac <-adonis2(wunifrac_dist.pup.nosibling~sitetr1+sitetr2, data=metadata.psrt.pup.nosibling.wunifrac , by="margin", perm=9999)
+  set.seed(123)
+  pmod.pup.nosibling.sitetr1.wunifrac <-adonis2(wunifrac_dist.pup.nosibling~sitetr1, data=metadata.psrt.pup.nosibling.wunifrac , by="terms", perm=9999)
+  set.seed(123)
+  pmod.pup.nosibling.sitetr2.wunifrac <-adonis2(wunifrac_dist.pup.nosibling~sitetr2, data=metadata.psrt.pup.nosibling.wunifrac , by="terms", perm=9999)
+  
+  #calculate group dispersion
+  set.seed(123)
+  betadisper.pup.nosibling.sitetr1.wunifrac  <- betadisper(wunifrac_dist.pup.nosibling, phyloseq::sample_data(psrt.pup.nosibling.wunifrac)$sitetr1, bias.adjust = TRUE, type=c("centroid"), sqrt.dist = FALSE, add = FALSE)
+  betadisper.pup.nosibling.sitetr1.anova.wunifrac <-anova(betadisper.pup.nosibling.sitetr1.wunifrac)
+  set.seed(123)
+  betadisper.pup.nosibling.sitetr2.wunifrac  <- betadisper(wunifrac_dist.pup.nosibling, phyloseq::sample_data(psrt.pup.nosibling.wunifrac)$sitetr2, bias.adjust = TRUE, type=c("centroid"), sqrt.dist = FALSE, add = FALSE)
+  betadisper.pup.nosibling.sitetr2.anova.wunifrac<-anova(betadisper.pup.nosibling.sitetr2.wunifrac)
+  
+  #summate all the pvalues into one object
+  
+  #INTERACTION: sitetr1 * sitetr2
+  pvalue.adonis2.interaction.wunifrac<-pvalue.adonis2.interaction.wunifrac+pmod.pup.nosibling_adonis2_1.wunifrac$`Pr(>F)`[1]
+  #SUM: sitetr1 + sitetr2
+  pvalue.adonis2.som.sitetr1.wunifrac<-pvalue.adonis2.som.sitetr1.wunifrac+pmod.pup.nosibling_adonis2_2.wunifrac$`Pr(>F)`[1]
+  pvalue.adonis2.som.sitetr2.wunifrac<-pvalue.adonis2.som.sitetr2.wunifrac+pmod.pup.nosibling_adonis2_2.wunifrac$`Pr(>F)`[2]
+  sumofsqs.1.wunifrac<-sumofsqs.1.wunifrac+pmod.pup.nosibling_adonis2_2.wunifrac$SumOfSqs[1]
+  sumofsqs.2.wunifrac<-sumofsqs.2.wunifrac+pmod.pup.nosibling_adonis2_2.wunifrac$SumOfSqs[2]
+  sumofsqs.res.wunifrac<-sumofsqs.res.wunifrac+pmod.pup.nosibling_adonis2_2.wunifrac$SumOfSqs[3]
+  r2.1.wunifrac<-r2.1.wunifrac+pmod.pup.nosibling_adonis2_2.wunifrac$R2[1]
+  r2.2.wunifrac<-r2.2.wunifrac+pmod.pup.nosibling_adonis2_2.wunifrac$R2[2]
+  f.1.wunifrac<-f.1.wunifrac+pmod.pup.nosibling_adonis2_2.wunifrac$F[1]
+  f.2.wunifrac<-f.2.wunifrac+pmod.pup.nosibling_adonis2_2.wunifrac$F[2]
+  #Site of origin: sitetr1
+  pvalue.sitetr1.wunifrac<-pvalue.sitetr1.wunifrac + pmod.pup.nosibling.sitetr1.wunifrac$`Pr(>F)`[1] 
+  sumofsqs.sitetr1.1.wunifrac<-sumofsqs.sitetr1.1.wunifrac+pmod.pup.nosibling.sitetr1.wunifrac$SumOfSqs[1]
+  sumofsqs.sitetr1.res.wunifrac<-sumofsqs.sitetr1.res.wunifrac+pmod.pup.nosibling.sitetr1.wunifrac$SumOfSqs[2]
+  r2.sitetr1.wunifrac<-r2.sitetr1.wunifrac+pmod.pup.nosibling.sitetr1.wunifrac$R2[1]
+  f.sitetr1.wunifrac<-f.sitetr1.wunifrac+pmod.pup.nosibling.sitetr1.wunifrac$F[1]
+  #Site of transfer: sitetr2
+  pvalue.sitetr2.wunifrac<-pvalue.sitetr2.wunifrac + pmod.pup.nosibling.sitetr2.wunifrac$`Pr(>F)`[1] 
+  sumofsqs.sitetr2.1.wunifrac<-sumofsqs.sitetr2.1.wunifrac+pmod.pup.nosibling.sitetr2.wunifrac$SumOfSqs[1]
+  sumofsqs.sitetr2.res.wunifrac<-sumofsqs.sitetr2.res.wunifrac+pmod.pup.nosibling.sitetr2.wunifrac$SumOfSqs[2]
+  r2.sitetr2.wunifrac<-r2.sitetr2.wunifrac+pmod.pup.nosibling.sitetr2.wunifrac$R2[1]
+  f.sitetr2.wunifrac<-f.sitetr2.wunifrac+pmod.pup.nosibling.sitetr2.wunifrac$F[1]
+  #Group dispersion
+  pvalue.betadisper.sitetr1.wunifrac<-pvalue.betadisper.sitetr1.wunifrac + betadisper.pup.nosibling.sitetr1.anova.wunifrac$`Pr(>F)`[1]
+  pvalue.betadisper.sitetr2.wunifrac<-pvalue.betadisper.sitetr2.wunifrac + betadisper.pup.nosibling.sitetr2.anova.wunifrac$`Pr(>F)`[1]
+  
+}
+#RESULTS
+
+#INTERACTION: sitetr1*sitetr2
+final_pvalue.interaction.wunifrac<-pvalue.adonis2.interaction.wunifrac/n_iterations #p=0.1747
+#SOM: sitetr1 + sitetr2
+final_pvalue.adonis2.som.sitetr1.wunifrac <- pvalue.adonis2.som.sitetr1.wunifrac/n_iterations  #0.2498
+final_pvalue.adonis2.som.sitetr2.wunifrac <- pvalue.adonis2.som.sitetr2.wunifrac/n_iterations  #0.4087
+final_ss.som.sitetr1.wunifrac<-sumofsqs.1.wunifrac/n_iterations #
+final_ss.som.sitetr2.wunifrac<-sumofsqs.2.wunifrac/n_iterations #
+final_ss.som.res.wunifrac<-sumofsqs.res.wunifrac/n_iterations 
+calculated_ss.som.total.wunifrac <- final_ss.som.sitetr1.wunifrac+final_ss.som.sitetr2.wunifrac+final_ss.som.res.wunifrac
+final_r2.som.sitetr1.wunifrac <- r2.1.wunifrac/n_iterations #0.
+final_r2.som.sitetr2.wunifrac <- r2.2.wunifrac/n_iterations #0.
+calculated_r2.som.res.wunifrac = (1-(final_r2.som.sitetr1.wunifrac)-(final_r2.som.sitetr2.wunifrac))
+final_f.1.wunifrac <- f.1.wunifrac/n_iterations 
+final_f.2.wunifrac <- f.2.wunifrac/n_iterations 
+
+#SITE OF ORIGIN
+final_pvalue.sitetr1.wunifrac <- pvalue.sitetr1.wunifrac/n_iterations
+final_sumofsqs.sitetr1.1.wunifrac <- sumofsqs.sitetr1.1.wunifrac/n_iterations
+final_sumofsqs.sitetr1.res.wunifrac <- sumofsqs.sitetr1.res.wunifrac/n_iterations
+calculated_ss.sitetr1.total.wunifrac <- final_sumofsqs.sitetr1.1.wunifrac+final_sumofsqs.sitetr1.res.wunifrac
+final_r2.sitetr1.1.wunifrac <- r2.sitetr1.wunifrac/n_iterations
+calculated_r2.sitetr1.res.wunifrac = (1-final_r2.sitetr1.1.wunifrac)
+final_f.sitetr1.wunifrac <- f.sitetr1.wunifrac/n_iterations
+
+#SITE OF TRANSFER
+final_pvalue.sitetr2.wunifrac <- pvalue.sitetr2.wunifrac/n_iterations
+final_sumofsqs.sitetr2.1.wunifrac <- sumofsqs.sitetr2.1.wunifrac/n_iterations
+final_sumofsqs.sitetr2.res.wunifrac <- sumofsqs.sitetr2.res.wunifrac/n_iterations
+calculated_ss.sitetr2.total.wunifrac <- final_sumofsqs.sitetr2.1.wunifrac+final_sumofsqs.sitetr2.res.wunifrac
+final_r2.sitetr2.1.wunifrac <- r2.sitetr2.wunifrac/n_iterations
+calculated_r2.sitetr2.res.wunifrac = (1-final_r2.sitetr2.1.wunifrac)
+final_f.sitetr2.wunifrac<- f.sitetr2.wunifrac/n_iterations
+
+#GROUP DISPERSION
+final_pvalue.betadisper.sitetr1.wunifrac <- pvalue.betadisper.sitetr1.wunifrac/n_iterations #0.8
+final_pvalue.betadisper.sitetr2.wunifrac <- pvalue.betadisper.sitetr2.wunifrac/n_iterations #0.48
+
+#MAKE TABLES
+df_som_wunifrac <- data.frame(var=c('sitetr1', 'sitetr2', 'Residual', 'Total'),
+                                 Df=c(1,1,30,32),
+                                 SumOfSqs=c(final_ss.som.sitetr1.wunifrac,final_ss.som.sitetr2.wunifrac,final_ss.som.res.wunifrac,calculated_ss.som.total.wunifrac),
+                                 R2=c(final_r2.som.sitetr1.wunifrac,final_r2.som.sitetr2.wunifrac,calculated_r2.som.res.wunifrac,1),
+                                 "F"=c(final_f.1, final_f.2.wunifrac ,"",""),
+                                 "p"=c(final_pvalue.adonis2.som.sitetr1.wunifrac,final_pvalue.adonis2.som.sitetr2.wunifrac,"",""))
+
+df_sitetr1_wunifrac <- data.frame(var=c('sitetr1', 'Residual', 'Total'),
+                                     Df=c(1,31,32),
+                                     SumOfSqs=c(final_sumofsqs.sitetr1.1.wunifrac , final_sumofsqs.sitetr1.res.wunifrac , calculated_ss.sitetr1.total.wunifrac),
+                                     R2=c(final_r2.som.sitetr1.wunifrac , calculated_r2.sitetr1.res.wunifrac , "1"),
+                                     "F"=c(final_f.sitetr1.wunifrac,"",""),
+                                     "p"=c(final_pvalue.sitetr1.wunifrac,"",""))
+
+df_sitetr2_wunifrac <- data.frame(var=c('sitetr2', 'Residual', 'Total'),
+                                     Df=c(1,31,32),
+                                     SumOfSqs=c(final_sumofsqs.sitetr2.1.wunifrac , final_sumofsqs.sitetr2.res.wunifrac , calculated_ss.sitetr2.total.wunifrac),
+                                     R2=c(final_r2.som.sitetr2.wunifrac , calculated_r2.sitetr2.res.wunifrac , "1"),
+                                     "F"=c(final_f.sitetr2.wunifrac,"",""),
+                                     "p"=c(final_pvalue.sitetr2.wunifrac,"",""))
+
+#################################################
+```
+**Output table treatment**
+```{r}
+df_som_wunifrac
+write.table(df_som_wunifrac, "adonis2_som_wunifrac.txt")
+```
+**Output table in terms of site of origin**
+```{r}
+df_sitetr1_wunifrac
+write.table(df_sitetr1_wunifrac, "adonis2_sitetr1_wunifrac.txt")
+```
+**Betadisper p-value site of origin**
+```{r}
+final_pvalue.betadisper.sitetr1.wunifrac
+```
+**Output table in terms of site of transfer**
+```{r}
+df_sitetr2_wunifrac
+write.table(df_sitetr2_wunifrac, "adonis2_sitetr2_wunifrac.txt")
+```
+**Betadisper p-value site of transfer**
+```{r}
+final_pvalue.betadisper.sitetr2.wunifrac
+```
+
+### Unweighted Unifrac metric
+
+```{r}
+#################################################
+#UNWEIGHTED UNIFRAC 1000 iterations = results look the same
+#################################################
+#INTERACTION = NS (0.534)
+#SOM IN TERMS OF SITETR1 = almost significant (p=0.0845), IN TERMS OF SITETR2 = almost significant (p=0.1037)
+#SITETR1 = almost significant (p=0.0876)
+#SITETR2 = almost significant (p=0.1073)
+#################################################
+#################################################
+#adonis 2
+pvalue.adonis2.interaction.unwunifrac<-0
+pvalue.adonis2.som.sitetr1.unwunifrac<-0
+pvalue.adonis2.som.sitetr2.unwunifrac<-0
+pvalue.sitetr1.unwunifrac<-0
+pvalue.sitetr2.unwunifrac<-0
+sumofsqs.1.unwunifrac<-0
+sumofsqs.2.unwunifrac<-0
+sumofsqs.res.unwunifrac<-0
+sumofsqs.tot.unwunifrac<-0
+sumofsqs.sitetr1.1.unwunifrac<-0
+sumofsqs.sitetr1.res.unwunifrac<-0
+sumofsqs.sitetr2.1.unwunifrac<-0
+sumofsqs.sitetr2.res.unwunifrac<-0
+r2.1.unwunifrac<-0
+r2.2.unwunifrac<-0
+r2.res.unwunifrac<-0
+r2.sitetr1.unwunifrac<-0
+r2.sitetr2.unwunifrac<-0
+f.1.unwunifrac<-0
+f.2.unwunifrac<-0
+f.sitetr1.unwunifrac<-0
+f.sitetr2.unwunifrac<-0
+#betadisper
+pvalue.betadisper.sitetr1.unwunifrac <-0
+pvalue.betadisper.sitetr2.unwunifrac <-0
+
+n_iterations <- 10
+for (i in 1:n_iterations)  
+{
+  #Take 1 random sample of pup per mom
+  meta.pup.1sibling<-metadata.pup %>% group_by(geneticcluster) %>% dplyr::slice_sample(n = 1) %>% as.data.frame()
+  #make this subset into a dataframe
+  meta_subset_unwunifrac<-as.data.frame(meta.pup.1sibling)
+  write.table(meta_subset_unwunifrac,"meta_subset_unwunifrac.txt",sep="\t",row.names=FALSE, quote = FALSE)
+  #make a new phyloseq with only 33 pups instead of 72
+  psrt.pup.nosibling.unwunifrac<-qza_to_phyloseq(
+    features="rt_table16s_filtermin10freq_rar30671.qza",
+    taxonomy="rt_taxonomysilva.qza",
+    metadata = "meta_subset_unwunifrac.txt",
+    tree = "rt_rooted-tree.qza"
+  )
+  metadata.psrt.pup.nosibling.unwunifrac <- as(sample_data(psrt.pup.nosibling.unwunifrac), "data.frame")
+  #Calculate distance for this phyloseq
+  set.seed(123)
+  unwunifrac_dist.pup.nosibling = phyloseq::distance(psrt.pup.nosibling.unwunifrac, method="unwunifrac")
+  
+  #Calculate adonis for this phyloseq
+  set.seed(123)
+  pmod.pup.nosibling_adonis2_1.unwunifrac <-adonis2(unwunifrac_dist.pup.nosibling~sitetr1+sitetr2+sitetr1:sitetr2, data=metadata.psrt.pup.nosibling.unwunifrac , by="margin", perm=9999)
+  set.seed(123)
+  pmod.pup.nosibling_adonis2_2.unwunifrac <-adonis2(unwunifrac_dist.pup.nosibling~sitetr1+sitetr2, data=metadata.psrt.pup.nosibling.unwunifrac , by="margin", perm=9999)
+  set.seed(123)
+  pmod.pup.nosibling.sitetr1.unwunifrac <-adonis2(unwunifrac_dist.pup.nosibling~sitetr1, data=metadata.psrt.pup.nosibling.unwunifrac , by="terms", perm=9999)
+  set.seed(123)
+  pmod.pup.nosibling.sitetr2.unwunifrac <-adonis2(unwunifrac_dist.pup.nosibling~sitetr2, data=metadata.psrt.pup.nosibling.unwunifrac , by="terms", perm=9999)
+  
+  #calculate group dispersion
+  set.seed(123)
+  betadisper.pup.nosibling.sitetr1.unwunifrac  <- betadisper(unwunifrac_dist.pup.nosibling, phyloseq::sample_data(psrt.pup.nosibling.unwunifrac)$sitetr1, bias.adjust = TRUE, type=c("centroid"), sqrt.dist = FALSE, add = FALSE)
+  betadisper.pup.nosibling.sitetr1.anova.unwunifrac <-anova(betadisper.pup.nosibling.sitetr1.unwunifrac)
+  set.seed(123)
+  betadisper.pup.nosibling.sitetr2.unwunifrac  <- betadisper(unwunifrac_dist.pup.nosibling, phyloseq::sample_data(psrt.pup.nosibling.unwunifrac)$sitetr2, bias.adjust = TRUE, type=c("centroid"), sqrt.dist = FALSE, add = FALSE)
+  betadisper.pup.nosibling.sitetr2.anova.unwunifrac<-anova(betadisper.pup.nosibling.sitetr2.unwunifrac)
+  
+  #summate all the pvalues into one object
+  
+  #INTERACTION: sitetr1 * sitetr2
+  pvalue.adonis2.interaction.unwunifrac<-pvalue.adonis2.interaction.unwunifrac+pmod.pup.nosibling_adonis2_1.unwunifrac$`Pr(>F)`[1]
+  #SUM: sitetr1 + sitetr2
+  pvalue.adonis2.som.sitetr1.unwunifrac<-pvalue.adonis2.som.sitetr1.unwunifrac+pmod.pup.nosibling_adonis2_2.unwunifrac$`Pr(>F)`[1]
+  pvalue.adonis2.som.sitetr2.unwunifrac<-pvalue.adonis2.som.sitetr2.unwunifrac+pmod.pup.nosibling_adonis2_2.unwunifrac$`Pr(>F)`[2]
+  sumofsqs.1.unwunifrac<-sumofsqs.1.unwunifrac+pmod.pup.nosibling_adonis2_2.unwunifrac$SumOfSqs[1]
+  sumofsqs.2.unwunifrac<-sumofsqs.2.unwunifrac+pmod.pup.nosibling_adonis2_2.unwunifrac$SumOfSqs[2]
+  sumofsqs.res.unwunifrac<-sumofsqs.res.unwunifrac+pmod.pup.nosibling_adonis2_2.unwunifrac$SumOfSqs[3]
+  r2.1.unwunifrac<-r2.1.unwunifrac+pmod.pup.nosibling_adonis2_2.unwunifrac$R2[1]
+  r2.2.unwunifrac<-r2.2.unwunifrac+pmod.pup.nosibling_adonis2_2.unwunifrac$R2[2]
+  f.1.unwunifrac<-f.1.unwunifrac+pmod.pup.nosibling_adonis2_2.unwunifrac$F[1]
+  f.2.unwunifrac<-f.2.unwunifrac+pmod.pup.nosibling_adonis2_2.unwunifrac$F[2]
+  #Site of origin: sitetr1
+  pvalue.sitetr1.unwunifrac<-pvalue.sitetr1.unwunifrac + pmod.pup.nosibling.sitetr1.unwunifrac$`Pr(>F)`[1] 
+  sumofsqs.sitetr1.1.unwunifrac<-sumofsqs.sitetr1.1.unwunifrac+pmod.pup.nosibling.sitetr1.unwunifrac$SumOfSqs[1]
+  sumofsqs.sitetr1.res.unwunifrac<-sumofsqs.sitetr1.res.unwunifrac+pmod.pup.nosibling.sitetr1.unwunifrac$SumOfSqs[2]
+  r2.sitetr1.unwunifrac<-r2.sitetr1.unwunifrac+pmod.pup.nosibling.sitetr1.unwunifrac$R2[1]
+  f.sitetr1.unwunifrac<-f.sitetr1.unwunifrac+pmod.pup.nosibling.sitetr1.unwunifrac$F[1]
+  #Site of transfer: sitetr2
+  pvalue.sitetr2.unwunifrac<-pvalue.sitetr2.unwunifrac + pmod.pup.nosibling.sitetr2.unwunifrac$`Pr(>F)`[1] 
+  sumofsqs.sitetr2.1.unwunifrac<-sumofsqs.sitetr2.1.unwunifrac+pmod.pup.nosibling.sitetr2.unwunifrac$SumOfSqs[1]
+  sumofsqs.sitetr2.res.unwunifrac<-sumofsqs.sitetr2.res.unwunifrac+pmod.pup.nosibling.sitetr2.unwunifrac$SumOfSqs[2]
+  r2.sitetr2.unwunifrac<-r2.sitetr2.unwunifrac+pmod.pup.nosibling.sitetr2.unwunifrac$R2[1]
+  f.sitetr2.unwunifrac<-f.sitetr2.unwunifrac+pmod.pup.nosibling.sitetr2.unwunifrac$F[1]
+  #Group dispersion
+  pvalue.betadisper.sitetr1.unwunifrac<-pvalue.betadisper.sitetr1.unwunifrac + betadisper.pup.nosibling.sitetr1.anova.unwunifrac$`Pr(>F)`[1]
+  pvalue.betadisper.sitetr2.unwunifrac<-pvalue.betadisper.sitetr2.unwunifrac + betadisper.pup.nosibling.sitetr2.anova.unwunifrac$`Pr(>F)`[1]
+  
+}
+#RESULTS
+
+#INTERACTION: sitetr1*sitetr2
+final_pvalue.interaction.unwunifrac<-pvalue.adonis2.interaction.unwunifrac/n_iterations #p=0.534
+#SOM: sitetr1 + sitetr2
+final_pvalue.adonis2.som.sitetr1.unwunifrac <- pvalue.adonis2.som.sitetr1.unwunifrac/n_iterations  #0.0845
+final_pvalue.adonis2.som.sitetr2.unwunifrac <- pvalue.adonis2.som.sitetr2.unwunifrac/n_iterations  #0.1037
+final_ss.som.sitetr1.unwunifrac<-sumofsqs.1.unwunifrac/n_iterations #
+final_ss.som.sitetr2.unwunifrac<-sumofsqs.2.unwunifrac/n_iterations #
+final_ss.som.res.unwunifrac<-sumofsqs.res.unwunifrac/n_iterations 
+calculated_ss.som.total.unwunifrac <- final_ss.som.sitetr1.unwunifrac+final_ss.som.sitetr2.unwunifrac+final_ss.som.res.unwunifrac
+final_r2.som.sitetr1.unwunifrac <- r2.1.unwunifrac/n_iterations #0.
+final_r2.som.sitetr2.unwunifrac <- r2.2.unwunifrac/n_iterations #0.
+calculated_r2.som.res.unwunifrac = (1-(final_r2.som.sitetr1.unwunifrac)-(final_r2.som.sitetr2.unwunifrac))
+final_f.1.unwunifrac <- f.1.unwunifrac/n_iterations 
+final_f.2.unwunifrac <- f.2.unwunifrac/n_iterations 
+
+#SITE OF ORIGIN
+final_pvalue.sitetr1.unwunifrac <- pvalue.sitetr1.unwunifrac/n_iterations
+final_sumofsqs.sitetr1.1.unwunifrac <- sumofsqs.sitetr1.1.unwunifrac/n_iterations
+final_sumofsqs.sitetr1.res.unwunifrac <- sumofsqs.sitetr1.res.unwunifrac/n_iterations
+calculated_ss.sitetr1.total.unwunifrac <- final_sumofsqs.sitetr1.1.unwunifrac+final_sumofsqs.sitetr1.res.unwunifrac
+final_r2.sitetr1.1.unwunifrac <- r2.sitetr1.unwunifrac/n_iterations
+calculated_r2.sitetr1.res.unwunifrac = (1-final_r2.sitetr1.1.unwunifrac)
+final_f.sitetr1.unwunifrac <- f.sitetr1.unwunifrac/n_iterations
+
+#SITE OF TRANSFER
+final_pvalue.sitetr2.unwunifrac <- pvalue.sitetr2.unwunifrac/n_iterations
+final_sumofsqs.sitetr2.1.unwunifrac <- sumofsqs.sitetr2.1.unwunifrac/n_iterations
+final_sumofsqs.sitetr2.res.unwunifrac <- sumofsqs.sitetr2.res.unwunifrac/n_iterations
+calculated_ss.sitetr2.total.unwunifrac <- final_sumofsqs.sitetr2.1.unwunifrac+final_sumofsqs.sitetr2.res.unwunifrac
+final_r2.sitetr2.1.unwunifrac <- r2.sitetr2.unwunifrac/n_iterations
+calculated_r2.sitetr2.res.unwunifrac = (1-final_r2.sitetr2.1.unwunifrac)
+final_f.sitetr2.unwunifrac<- f.sitetr2.unwunifrac/n_iterations
+
+#GROUP DISPERSION
+final_pvalue.betadisper.sitetr1.unwunifrac <- pvalue.betadisper.sitetr1.unwunifrac/n_iterations #0.2114821
+final_pvalue.betadisper.sitetr2.unwunifrac <- pvalue.betadisper.sitetr2.unwunifrac/n_iterations #0.827527
+
+#MAKE TABLES
+df_som_unwunifrac <- data.frame(var=c('sitetr1', 'sitetr2', 'Residual', 'Total'),
+                                Df=c(1,1,30,32),
+                                SumOfSqs=c(final_ss.som.sitetr1.unwunifrac,final_ss.som.sitetr2.unwunifrac,final_ss.som.res.unwunifrac,calculated_ss.som.total.unwunifrac),
+                                R2=c(final_r2.som.sitetr1.unwunifrac,final_r2.som.sitetr2.unwunifrac,calculated_r2.som.res.unwunifrac,1),
+                                "F"=c(final_f.1, final_f.2.unwunifrac ,"",""),
+                                "p"=c(final_pvalue.adonis2.som.sitetr1.unwunifrac,final_pvalue.adonis2.som.sitetr2.unwunifrac,"",""))
+
+df_sitetr1_unwunifrac <- data.frame(var=c('sitetr1', 'Residual', 'Total'),
+                                    Df=c(1,31,32),
+                                    SumOfSqs=c(final_sumofsqs.sitetr1.1.unwunifrac , final_sumofsqs.sitetr1.res.unwunifrac , calculated_ss.sitetr1.total.unwunifrac),
+                                    R2=c(final_r2.som.sitetr1.unwunifrac , calculated_r2.sitetr1.res.unwunifrac , "1"),
+                                    "F"=c(final_f.sitetr1.unwunifrac,"",""),
+                                    "p"=c(final_pvalue.sitetr1.unwunifrac,"",""))
+
+df_sitetr2_unwunifrac <- data.frame(var=c('sitetr2', 'Residual', 'Total'),
+                                    Df=c(1,31,32),
+                                    SumOfSqs=c(final_sumofsqs.sitetr2.1.unwunifrac , final_sumofsqs.sitetr2.res.unwunifrac , calculated_ss.sitetr2.total.unwunifrac),
+                                    R2=c(final_r2.som.sitetr2.unwunifrac , calculated_r2.sitetr2.res.unwunifrac , "1"),
+                                    "F"=c(final_f.sitetr2.unwunifrac,"",""),
+                                    "p"=c(final_pvalue.sitetr2.unwunifrac,"",""))
+
+#################################################
+```
+**Output table treatment**
+```{r}
+df_som_unwunifrac
+write.table(df_som_unwunifrac, "adonis2_som_unwunifrac.txt")
+```
+**Output table in terms of site of origin**
+```{r}
+df_sitetr1_unwunifrac
+write.table(df_sitetr1_unwunifrac, "adonis2_sitetr1_unwunifrac.txt")
+```
+**Betadisper p-value site of origin**
+```{r}
+final_pvalue.betadisper.sitetr1.unwunifrac
+```
+**Output table in terms of site of transfer**
+```{r}
+df_sitetr2_unwunifrac
+write.table(df_sitetr2_unwunifrac, "adonis2_sitetr2_unwunifrac.txt")
+```
+**Betadisper p-value site of transfer**
+```{r}
+final_pvalue.betadisper.sitetr2.unwunifrac
+```
+
+### All metrics in terms of genetic cluster
+
+```{r}
+#ALPHA DIVERSITY
+set.seed(123)
+model3.geneticcluster<-lm(observed_features_log~geneticcluster, data=metadata.pup)
+summary(model3.geneticcluster) #Adjusted R2 = 3256, p-value = 0.01551
+set.seed(123)
+model3.geneticcluster.sh<-lm(shannon_entropy~geneticcluster, data=metadata.pup)
+summary(model3.geneticcluster.sh) #Adjusted R2 = 0.3214, p-value = 0.01667
+set.seed(123)
+model3.geneticcluster.pd<-lm(faith_pd~geneticcluster, data=metadata.pup)
+summary(model3.geneticcluster.pd) #Adjusted R2 = 0.4175, p-value = 0.002517
+
+#BETA DIVERSITY
+set.seed(123)
+bray_dist.pup = phyloseq::distance(psrt.pup, method="bray")
+set.seed(123)
+jacc_dist.pup = phyloseq::distance(psrt.pup, method="jaccard")
+set.seed(123)
+uu_dist.pup = phyloseq::distance(psrt.pup, method="uunifrac")
+set.seed(123)
+wu_dist.pup = phyloseq::distance(psrt.pup, method="wunifrac")
+metadata.psrt.pup.gc <- as(sample_data(psrt.pup), "data.frame")
+metadata.psrt.pup.gc$geneticcluster<-as.factor(metadata.psrt.pup.gc$geneticcluster)
+
+set.seed(123)
+pmod.pup.geneticcluster.bray<-adonis2(bray_dist.pup~geneticcluster, data=metadata.psrt.pup.gc, by="margin", perm=9999)
+pmod.pup.geneticcluster.bray
+set.seed(123)
+pmod.pup.geneticcluster.jacc<-adonis2(jacc_dist.pup~geneticcluster, data=metadata.psrt.pup.gc, by="margin", perm=9999)
+pmod.pup.geneticcluster.jacc
+set.seed(123)
+pmod.pup.geneticcluster.wu<-adonis2(wu_dist.pup~geneticcluster, data=metadata.psrt.pup.gc, by="margin", perm=9999)
+pmod.pup.geneticcluster.wu
+set.seed(123)
+pmod.pup.geneticcluster.uu<-adonis2(uu_dist.pup~geneticcluster, data=metadata.psrt.pup.gc, by="margin", perm=9999)
+pmod.pup.geneticcluster.uu
+```
+
+
+
+## Recreate Figure S1
+
+**Individual taxa bar plots displaying the bacterial families in the post-transfer gut microbiota in adult and juvenile bank voles arranged according to experimental group**
+
+```{r}
+physeq2.f.3 = filter_taxa(psrt.mom.time3, function(x) mean(x) > 0.1, TRUE)
+physeq3.f.3 = transform_sample_counts(physeq2.f.3, function(x) x / sum(x) )
+glom.f.3 <- tax_glom(physeq3.f.3, taxrank = 'Family')
+data_glom.3 <- psmelt(glom.f.3) 
+data_glom.3$Family <- as.character(data_glom.3$Family) 
+data_glom.3$Family <- factor(data_glom.3$Family, 
+                             levels = c("NA","Campylobacteraceae",
+                                        "Ruminococcaceae", "Christensenellaceae","Desulfovibrionaceae",
+                                        "Oscillospiraceae","Lachnospiraceae",
+                                        "Lactobacillaceae","Muribaculaceae"))
+
+data_glom.3$treatment[data_glom.3$treatment=="urburb"]<-"Urban-Urban"
+data_glom.3$treatment[data_glom.3$treatment=="urbcont"]<-"Urban-Rural"
+data_glom.3$treatment[data_glom.3$treatment=="conturb"]<-"Rural-Urban"
+data_glom.3$treatment[data_glom.3$treatment=="contcont"]<-"Rural-Rural"
+plot.fig.S3<-ggplot(data_glom.3, 
+       aes(x=Sample, y=Abundance, fill=Family)) + 
+  geom_bar(stat="identity", position="fill",color="black") + 
+  facet_grid(~treatment, scale="free")+
+  scale_fill_manual(values = c("#9E0142", "#D53E4F", "#F46D43", "#FDAE61", "#FEE08B","#ABDDA4","blue","purple")) +
+  theme_bw()+
+  xlab("Individual adult bank vole")+
+  ylab("Relative Abundance")+
+  theme(axis.text.x=element_blank())
+
+physeq2.f.pup = filter_taxa(psrt.pup, function(x) mean(x) > 0.1, TRUE)
+physeq3.f.pup = transform_sample_counts(physeq2.f.pup, function(x) x / sum(x) )
+glom.f.pup <- tax_glom(physeq3.f.pup, taxrank = 'Family')
+data_glom.pup <- psmelt(glom.f.pup) 
+data_glom.pup$Family <- as.character(data_glom.pup$Family) 
+data_glom.pup$Family <- factor(data_glom.pup$Family, 
+                             levels = c("NA","Campylobacteraceae",
+                                        "Ruminococcaceae", "Christensenellaceae","Desulfovibrionaceae",
+                                        "Oscillospiraceae","Lachnospiraceae",
+                                        "Lactobacillaceae","Muribaculaceae"))
+
+data_glom.pup$treatment[data_glom.pup$treatment=="urburb"]<-"Urban-Urban"
+data_glom.pup$treatment[data_glom.pup$treatment=="urbcont"]<-"Urban-Rural"
+data_glom.pup$treatment[data_glom.pup$treatment=="conturb"]<-"Rural-Urban"
+data_glom.pup$treatment[data_glom.pup$treatment=="contcont"]<-"Rural-Rural"
+plot.fig.S3.pup<-ggplot(data_glom.pup, 
+                    aes(x=Sample, y=Abundance, fill=Family)) + 
+  geom_bar(stat="identity", position="fill",color="black") + 
+  facet_grid(~treatment, scale="free")+
+  scale_fill_manual(values = c("#9E0142", "#D53E4F", "#F46D43", "#FDAE61", "#FEE08B","#ABDDA4","blue","purple")) +
+  theme_bw()+
+  xlab("Individual pup")+
+  ylab("Relative Abundance")+
+  theme(axis.text.x=element_blank())
+
+plot.fig.S3.mom.pup<-ggarrange(plot.fig.S3, plot.fig.S3.pup,
+                       common.legend = TRUE,
+                       legend = "right",
+                       labels = c("A", "B"),
+                       ncol = 1, nrow = 2)
+
+plot.fig.S3.mom.pup # 8 x 6
+
+```
+
+## Recreate Figure S2
+
+**PCoA ordinations visualising the compositions of the pre-transfer gut microbiota of adult bank voles**
+
+```{r}
+#| fig-width: 9
+#| fig-height: 6
+
+p2.ord.bray.mom.1 <- ordinate(psrt.mom.time1, "PCoA", distance=bray_dist.mom.time1) 
+bray.mom.1 = plot_ordination(psrt.mom.time1, p2.ord.bray.mom.1, type="samples", color="sitetr1full",  axes=c(1,2)) +
+  stat_ellipse(aes(color=sitetr1), alpha=.5,linewidth =2)+
+  scale_color_manual(values=c("#693aa3","green", "#f00078"), name=c(""),
+                     labels=c("Rural (Jyväskylä)","Rural (Konnevesi)", "Urban"))+
+  xlab("PCoA Axis.1  [16%]")+
+  ylab("PCoA Axis.2  [9.6%]")+
+  ggtitle("Bray-Curtis: Pre-transfer") +
+  scale_y_continuous(position = "left")+
+  theme_minimal() 
+
+p2.ord.jacc.mom.1 <- ordinate(psrt.mom.time1, "PCoA", distance=jacc_dist.mom.time1) 
+jacc.mom.1 = plot_ordination(psrt.mom.time1, p2.ord.jacc.mom.1, type="samples", color="sitetr1full",  axes=c(1,2)) +
+  stat_ellipse(aes(color=sitetr1), alpha=.5,linewidth =2)+
+  scale_color_manual(values=c("#693aa3","green", "#f00078"), name=c(""),
+                     labels=c("Rural (Jyväskylä)","Rural (Konnevesi)", "Urban"))+
+  xlab("PCoA Axis.1  [11%]")+
+  ylab("PCoA Axis.2  [7.2%]")+
+  ggtitle("Jaccard: Pre-transfer") +
+  scale_y_continuous(position = "left")+
+  theme_minimal() 
+
+p2.ord.wunifrac.mom.1 <- ordinate(psrt.mom.time1, "PCoA", distance=wunifrac_dist.mom.time1) 
+wunifrac.mom.1 = plot_ordination(psrt.mom.time1, p2.ord.wunifrac.mom.1, type="samples", color="sitetr1full",  axes=c(1,2)) +
+  stat_ellipse(aes(color=sitetr1), alpha=.5,linewidth =2)+
+  scale_color_manual(values=c("#693aa3","green", "#f00078"), name=c(""),
+                     labels=c("Rural (Jyväskylä)","Rural (Konnevesi)", "Urban"))+
+  xlab("PCoA Axis.1  [45.2%]")+
+  ylab("PCoA Axis.2  [12%]")+
+  ggtitle("wUnifrac: Pre-transfer") +
+  scale_y_continuous(position = "left")+
+  theme_minimal() 
+
+p2.ord.uunifrac.mom.1 <- ordinate(psrt.mom.time1, "PCoA", distance=uunifrac_dist.mom.time1) 
+uunifrac.mom.1 = plot_ordination(psrt.mom.time1, p2.ord.uunifrac.mom.1, type="samples", color="sitetr1full",  axes=c(1,2)) +
+  stat_ellipse(aes(color=sitetr1), alpha=.5,linewidth =2)+
+  scale_color_manual(values=c("#693aa3","green", "#f00078"), name=c(""),
+                     labels=c("Rural (Jyväskylä)","Rural (Konnevesi)", "Urban"))+
+  xlab("PCoA Axis.1  [10.2%]")+
+  ylab("PCoA Axis.2  [9.8%]")+
+  ggtitle("unwUnifrac: Pre-transfer") +
+  scale_y_continuous(position = "left")+
+  theme_minimal() 
+
+plot.fig.t1<-ggarrange(bray.mom.1, jacc.mom.1,wunifrac.mom.1,uunifrac.mom.1,
+                       common.legend = TRUE,
+                       legend = "right",
+                       labels = c("A", "B","C","D"),
+                       ncol = 2, nrow = 2)
+
+plot.fig.t1 # 7 x 6
+```
+
+## Recreate Figure S3
+
+**Change in alpha diversity of the gut microbiota of bank voles throughout the experiment (ASV Richness)**
+
+```{r}
+#| fig-width: 7
+#| fig-height: 4
+plot.asv.t1.to.t3<-ggplot(data=diff.13, aes(x=treatment, y=asv_1_to_3, fill=treatment))+
+  geom_boxplot() +
+  theme(legend.position="right")+
+  labs(title= "ASV richness", x= "",y = "Change in alpha diversity")+
+  scale_x_discrete(labels=c("Rural-Rural","Rural-Urban","Urban-Rural","Urban-Urban"))+
+  scale_fill_manual(values=c("#693aa3","#7777ff","#ffc1e0","#f00078"),name=c("RT exp. group"),
+                    labels=c("Rural-Rural","Rural-Urban","Urban-Rural","Urban-Urban"))+
+  theme_minimal()
+
+plot.asv.t3<-ggplot(data=metadata.mom.time3, aes(x=treatment, y=observed_features, fill=treatment))+
+  geom_boxplot() +
+  theme(legend.position="right")+
+  labs(title= "Post-transfer ASV richness", x= "",y = "Total alpha diversity")+
+  scale_x_discrete(labels=c("Rural-Rural","Rural-Urban","Urban-Rural","Urban-Urban"))+
+  scale_fill_manual(values=c("#693aa3","#7777ff","#ffc1e0","#f00078"),name=c("RT exp. group"),
+                    labels=c("Rural-Rural","Rural-Urban","Urban-Rural","Urban-Urban"))+
+  theme_minimal()
+
+plot.alpha.change<-ggarrange(plot.asv.t1.to.t3+ rremove("x.text"), plot.asv.t3 + rremove("x.text"),
+                             common.legend = TRUE,
+                             legend = "right",
+                             labels = c("A", "B"),
+                             ncol = 2, nrow = 1)
+
+plot.alpha.change 
+```
+
+## Recreate Figure S4
+
+**Magnitude of change in beta diversity of the gut microbiota of bank voles in terms of past habitat**
+
+```{r}
+plot.bray.t1.to.t3<-ggplot(data=dist.13, aes(x=sitetr1, y=bray_1_to_3, fill=sitetr1))+
+  geom_boxplot() +
+  theme(legend.position="right")+
+  labs(title= "Bray-Curtis metric", x= "",y = "Change in Beta Diversity")+
+  scale_x_discrete(labels=c("Rural","Urban"))+
+  scale_fill_manual(values=c("#693aa3","#f00078"),name=c(""),
+                    labels=c("Rural","Urban"))+
+  geom_signif(y_position = c(0.95), xmin = c(1), xmax = c(2),annotation = c("ns"), tip_length = 0)+
+  theme_minimal()
+
+plot.jacc.t1.to.t3<-ggplot(data=dist.13, aes(x=sitetr1, y=jacc_1_to_3, fill=sitetr1))+
+  geom_boxplot() +
+  theme(legend.position="right")+
+  labs(title= "Jaccard metric", x= "",y = "Change in Beta Diversity")+
+  scale_x_discrete(labels=c("Rural","Urban"))+
+  scale_fill_manual(values=c("#693aa3","#f00078"),name=c(""),
+                    labels=c("Rural","Urban"))+
+  geom_signif(y_position = c(0.875), xmin = c(1), xmax = c(2),annotation = c("ns"), tip_length = 0)+
+  theme_minimal()
+
+plot.wunifrac.t1.to.t3<-ggplot(data=dist.13, aes(x=sitetr1, y=wunifrac_1_to_3, fill=sitetr1))+
+  geom_boxplot() +
+  theme(legend.position="right")+
+  labs(title= "wUnifrac metric", x= "",y = "Change in Beta Diversity")+
+  scale_x_discrete(labels=c("Rural","Urban"))+
+  scale_fill_manual(values=c("#693aa3","#f00078"),name=c(""),
+                    labels=c("Rural","Urban"))+
+  geom_signif(y_position = c(0.45), xmin = c(1), xmax = c(2),annotation = c("*"), tip_length = 0)+
+  theme_minimal()
+
+plot.unwunifrac.t1.to.t3<-ggplot(data=dist.13, aes(x=sitetr1, y=unwunifrac_1_to_3, fill=sitetr1))+
+  geom_boxplot() +
+  theme(legend.position="right")+
+  labs(title= "unwUnifrac metric", x= "",y = "Change in Beta Diversity")+
+  scale_x_discrete(labels=c("Rural","Urban"))+
+  scale_fill_manual(values=c("#693aa3","#f00078"),name=c(""),
+                    labels=c("Rural","Urban"))+
+  geom_signif(y_position = c(0.575), xmin = c(1), xmax = c(2),annotation = c("ns"), tip_length = 0)+
+  theme_minimal()
+
+plot.fig.turnover<-ggarrange(plot.bray.t1.to.t3+ rremove("x.text"), plot.jacc.t1.to.t3 + rremove("x.text"),plot.wunifrac.t1.to.t3+ rremove("x.text"),plot.unwunifrac.t1.to.t3+ rremove("x.text"),
+                             common.legend = TRUE,
+                             legend = "right",
+                             labels = c("A", "B","C","D"),
+                             ncol = 2, nrow = 2)
+
+plot.fig.turnover 
+```
+
+## Recreate Figure S5
+
+**Additional CAP ordinations visualising the compositions of adult and juvenile post-transfer gut microbiota in terms of past and present habitat**
+
+```{r}
+#| fig-width: 12
+#| fig-height: 10
+
+#######
+#ADULTS
+#######
+set.seed(123)
+cap.mom.3.jacc <- ordinate(physeq = psrt.mom.time3, method = "CAP",distance = jacc_dist.mom.time3,formula = ~ sitetr1+sitetr2)
+plot.mom.3.jacc<-plot_ordination(psrt.mom.time3, cap.mom.3.jacc,type = "samples",color="treatment")+geom_point(size = 3)+
+  scale_color_manual(values=c("#693aa3","#7777ff","#ffc1e0","#f00078"), name=(""),
+                     labels=c("Rural-Rural","Rural-Urban","Urban-Rural","Urban-Urban"))+
+  ggtitle("Adults: Jaccard metric")+xlab("CAP Axis.1  [6.4%]")+ylab("CAP Axis.2  [3.7%]")+theme_minimal()
+
+set.seed(123)
+cap.mom.3.wunifrac <- ordinate(physeq = psrt.mom.time3, method = "CAP",distance = wunifrac_dist.mom.time3,formula = ~ sitetr1+sitetr2)
+plot.mom.3.wunifrac<-plot_ordination(psrt.mom.time3, cap.mom.3.wunifrac,type = "samples",color="treatment")+geom_point(size = 3)+
+  scale_color_manual(values=c("#693aa3","#7777ff","#ffc1e0","#f00078"), name=(""),
+                     labels=c("Rural-Rural","Rural-Urban","Urban-Rural","Urban-Urban"))+
+  ggtitle("Adults: wUnifrac metric")+xlab("CAP Axis.1  [7.9%]")+ylab("CAP Axis.2  [4.5%]")+theme_minimal()
+
+set.seed(123)
+cap.mom.3.unwunifrac <- ordinate(physeq = psrt.mom.time3, method = "CAP",distance = uunifrac_dist.mom.time3,formula = ~ sitetr1+sitetr2)
+plot.mom.3.uunifrac<-plot_ordination(psrt.mom.time3, cap.mom.3.unwunifrac,type = "samples",color="treatment")+geom_point(size = 3)+
+  scale_color_manual(values=c("#693aa3","#7777ff","#ffc1e0","#f00078"), name=(""),
+                     labels=c("Rural-Rural","Rural-Urban","Urban-Rural","Urban-Urban"))+
+  ggtitle("Adults: unwUnifrac metric")+xlab("CAP Axis.1  [4.8%]")+ylab("CAP Axis.2  [4.4%]")+theme_minimal()
+
+plot.cap.adults.si<-ggarrange(plot.mom.3.jacc, plot.mom.3.wunifrac,plot.mom.3.uunifrac,
+                              common.legend = TRUE,
+                              legend = "right",
+                              labels = c("A","B", "C"),
+                              ncol = 3, nrow = 1, align="v"+ theme_void())
+
+########
+#OFFSPRING
+########
+set.seed(123)
+jacc_dist.pup.all = phyloseq::distance(psrt.pup, method="jaccard")
+set.seed(123)
+wunifrac_dist.pup.all = phyloseq::distance(psrt.pup, method="wunifrac")
+set.seed(123)
+uunifrac_dist.pup.all = phyloseq::distance(psrt.pup, method="uunifrac")
+metadata.psrt.pup.all <- as(sample_data(psrt.pup), "data.frame")
+set.seed(123)
+cap.pup.all.jacc <- ordinate(physeq = psrt.pup, method = "CAP",distance = jacc_dist.pup.all,formula = ~ sitetr1+sitetr2)
+set.seed(123)
+cap.pup.all.wunifrac <- ordinate(physeq = psrt.pup, method = "CAP",distance = wunifrac_dist.pup.all,formula = ~ sitetr1+sitetr2)
+set.seed(123)
+cap.pup.all.unwunifrac <- ordinate(physeq = psrt.pup, method = "CAP",distance = uunifrac_dist.pup.all,formula = ~ sitetr1+sitetr2)
+
+plot.pup.cap.jacc<-plot_ordination(psrt.pup, cap.pup.all.jacc,type = "samples",color="treatment")+geom_point(size = 3)+
+  scale_color_manual(values=c("#693aa3","#7777ff","#ffc1e0","#f00078"), name=(""),
+                     labels=c("Rural-Rural","Rural-Urban","Urban-Rural","Urban-Urban"))+
+  ggtitle("Offspring: Jaccard metric")+xlab("CAP Axis.1  [3%]")+ylab("CAP Axis.2  [1.8%]")+theme_minimal()
+
+plot.pup.cap.wunifrac<-plot_ordination(psrt.pup, cap.pup.all.wunifrac,type = "samples",color="treatment")+geom_point(size = 3)+
+  scale_color_manual(values=c("#693aa3","#7777ff","#ffc1e0","#f00078"), name=(""),
+                     labels=c("Rural-Rural","Rural-Urban","Urban-Rural","Urban-Urban"))+
+  ggtitle("Offspring: wUnifrac metric")+xlab("CAP Axis.1  [2.9%]")+ylab("CAP Axis.2  [1.9%]")+theme_minimal()
+
+plot.pup.cap.unwunifrac<-plot_ordination(psrt.pup, cap.pup.all.unwunifrac,type = "samples",color="treatment")+geom_point(size = 3)+
+  scale_color_manual(values=c("#693aa3","#7777ff","#ffc1e0","#f00078"), name=(""),
+                     labels=c("Rural-Rural","Rural-Urban","Urban-Rural","Urban-Urban"))+
+  ggtitle("Offspring: unwUnifrac metric")+xlab("CAP Axis.1  [3%]")+ylab("CAP Axis.2  [2.5%]")+theme_minimal()
+
+plot.cap.offspring.si<-ggarrange(plot.pup.cap.jacc, plot.pup.cap.wunifrac,plot.pup.cap.unwunifrac,
+                              common.legend = TRUE,
+                              legend = "right",
+                              labels = c("D","E", "F"),
+                              ncol = 3, nrow = 1, align="v"+ theme_void())
+
+plot.cap.all.si<-ggarrange(plot.cap.adults.si, plot.cap.offspring.si,
+                              common.legend = TRUE,
+                              legend = "right",
+                              ncol = 1, nrow = 2, align="v"+ theme_void())
+plot.cap.all.si # 10 x 12
+
+```
+
+## Recreate Figure S6
+
+**PCoA ordinations visualising the compositions of adult and juvenile post-transfer gut microbiota in terms of genetic cluster**
+
+```{r}
+#| fig-width: 10
+#| fig-height: 5
+set.seed(123)
+bray_dist.pup = phyloseq::distance(psrt.pup, method="bray")
+set.seed(123)
+jacc_dist.pup = phyloseq::distance(psrt.pup, method="jaccard")
+set.seed(123)
+uu_dist.pup = phyloseq::distance(psrt.pup, method="uunifrac")
+set.seed(123)
+wu_dist.pup = phyloseq::distance(psrt.pup, method="wunifrac")
+
+#MATCHED mothers + offspring
+set.seed(123)
+bray_dist.matched = phyloseq::distance(psrt.matched, method="bray")
+set.seed(123)
+jacc_dist.matched = phyloseq::distance(psrt.matched, method="jaccard")
+set.seed(123)
+uunifrac_dist.matched = phyloseq::distance(psrt.matched, method="uunifrac")
+set.seed(123)
+wunifrac_dist.matched = phyloseq::distance(psrt.matched, method="wunifrac")
+
+p2.ord.bray.matched <- ordinate(psrt.matched, "PCoA", distance=bray_dist.matched) 
+bray.matched = plot_ordination(psrt.matched, p2.ord.bray.matched, type="samples", color="geneticcluster_2",  shape="type",axes=c(1,2)) +
+   geom_point(alpha=2, size=3)+
+  labs(color='Genetic cluster',shape="Type")+ 
+  xlab("PCoA Axis.1  [15.5%]")+
+  ylab("PCoA Axis.2  [10.7%]")+
+  ggtitle("Matched mothers and offspring (Bray-Curtis metric)") +
+  scale_y_continuous(position = "left")+
+  theme_minimal() 
+
+p2.ord.bray.pup <- ordinate(psrt.pup, "PCoA", distance=bray_dist.pup) 
+plot.pcoa.pup.bray = plot_ordination(psrt.pup, p2.ord.bray.pup, type="samples", color="geneticcluster_2",axes=c(1,2)) +
+  geom_point(alpha=2, size=3)+
+  labs(color='Genetic cluster')+ 
+  xlab("PCoA Axis.1  [11.3%]")+
+  ylab("PCoA Axis.2  [9.5%]")+
+  ggtitle("All offspring (Bray-Curtis metric)") +
+  scale_y_continuous(position = "left")+
+  theme_minimal() 
+
+plot.geneticcluster<-ggarrange(bray.matched, plot.pcoa.pup.bray,
+                              common.legend = FALSE,
+                              legend = "right",
+                              labels = c("A","B"),
+                              ncol = 2, nrow = 1, align="v"+ theme_void())
+plot.geneticcluster # 10 x 12
+
+
+```
